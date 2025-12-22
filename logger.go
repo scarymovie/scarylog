@@ -1,8 +1,12 @@
 package scarylog
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
+
+	"github.com/pkg/errors"
 )
 
 type Logger struct {
@@ -123,8 +127,25 @@ func (l *Logger) Warn(msg string, args ...any) {
 	}
 }
 
+func caller(skip int) string {
+	_, file, line, ok := runtime.Caller(skip)
+	if !ok {
+		return "unknown"
+	}
+	return fmt.Sprintf("%s:%d", file, line)
+}
+
 func (l *Logger) Error(msg string, err error, args ...any) {
-	allArgs := []any{"error", err}
+	allArgs := []any{
+		"error", err,
+		"caller", caller(2),
+	}
+
+	st, ok := err.(interface{ StackTrace() errors.StackTrace })
+	if ok {
+		allArgs = append(allArgs, "stack", fmt.Sprintf("%+v", st))
+	}
+
 	if l.groupName != "" && len(args) > 0 {
 		allArgs = append(allArgs, slog.Group(l.groupName, args...))
 	} else {
