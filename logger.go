@@ -136,6 +136,11 @@ func caller(skip int) string {
 }
 
 func (l *Logger) Error(msg string, err error, args ...any) {
+	// If msg is empty, use the error message
+	if msg == "" {
+		msg = err.Error()
+	}
+
 	allArgs := []any{
 		"error", err,
 		"caller", caller(2),

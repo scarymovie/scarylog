@@ -1,18 +1,34 @@
 # scarylog
 
-This project `scarylog` is a Go module designed to provide a convenient wrapper around Go's structured logger, `slog`. The primary goal is to simplify logging operations and enforce consistent logging practices across applications.
+Этот проект `scarylog` - это Go-модуль, предназначенный для предоставления удобной обертки вокруг структурированного логгера Go, `slog`. Основная цель - упростить операции логгирования и обеспечить единообразную практику логгирования в приложениях.
 
-## Key Features
+## Установка
 
-*   **Simple Wrapper**: Provides a straightforward and convenient wrapper around Go's standard `slog` logger.
-*   **Colored Output**: Supports colored log output to the console for improved readability and easier debugging.
-*   **Flexible Configuration**: Offers flexible configuration through functional options like `WithLevel` and others.
-*   **Default Attributes**: Allows setting default attributes that will be included in all log entries for consistent context.
+Для установки пакета выполните:
 
-## Project Status
+```bash
+go get github.com/scarymovie/scarylog
+```
 
-This project now includes a basic `slog` wrapper. The initial setup includes:
+## Ключевые особенности
 
-*   Go module `scarylog`
-*   Go version 1.25
-*   `slog` wrapper with `Info`, `Warn`, `Error`, and `Debug` methods.
+*   **Простая обертка**: Предоставляет простую и удобную обертку вокруг стандартного логгера `slog` Go.
+*   **Гибкая настройка**: Предлагает гибкую настройку через функциональные опции, такие как `WithLevel` и другие.
+*   **Атрибуты по умолчанию**: Позволяет устанавливать атрибуты по умолчанию, которые будут включены во все записи лога для обеспечения согласованного контекста.
+
+## Статус проекта
+
+Этот проект теперь включает базовую обертку `slog`. Первоначальная настройка включает:
+
+*   Go-модуль `scarylog`
+*   Go версии 1.25
+*   Обертка `slog` с методами `Info`, `Warn`, `Error` и `Debug`.
+
+## Поведение функции Error
+
+Функция `Error` теперь работает следующим образом:
+
+*   `msg` передается в `slog.Logger.Error` как есть.
+*   `msg` не дублируется в `allArgs`.
+*   `msg` является необязательным параметром.
+*   Если `msg` является пустой строкой, он заполняется текстом ошибки `err.Error()`.
