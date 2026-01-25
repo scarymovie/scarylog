@@ -142,7 +142,7 @@ func (l *Logger) Error(msg string, err error, args ...any) {
 	}
 
 	allArgs := []any{
-		"error", err,
+		"message", err,
 		"caller", caller(2),
 	}
 
