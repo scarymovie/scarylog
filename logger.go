@@ -245,20 +245,47 @@ func (l *Logger) WithOverwrite(args ...any) *Logger {
 }
 
 // Group returns a new logger that directs its output to the specified group.
-
 // The new logger inherits all the settings of the parent logger.
-
 func (l *Logger) Group(name string) *Logger {
-
 	// Create a shallow copy of the logger, but with a new group name.
-
 	return &Logger{
-
-		logger: l.logger,
-
+		logger:    l.logger,
 		groupName: name,
-
-		opts: l.opts,
+		opts:      l.opts,
 	}
+}
 
+// GetAttr retrieves an attribute value from the logger's DefaultAttrs by key.
+// Returns the value and true if found, or nil and false if not found.
+func (l *Logger) GetAttr(key string) (any, bool) {
+	for i := 0; i < len(l.opts.DefaultAttrs); i += 2 {
+		if k, ok := l.opts.DefaultAttrs[i].(string); ok {
+			if k == key {
+				return l.opts.DefaultAttrs[i+1], true
+			}
+		}
+	}
+	return nil, false
+}
+
+// GetString retrieves a string attribute from the logger's DefaultAttrs by key.
+// Returns the value and true if found and is a string, or empty string and false otherwise.
+func (l *Logger) GetString(key string) (string, bool) {
+	if val, ok := l.GetAttr(key); ok {
+		if s, ok := val.(string); ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// GetAttrName returns the remapped attribute name if it exists in AttrMap, otherwise returns the original key.
+func (l *Logger) GetAttrName(key string) string {
+	if l.opts.AttrMap == nil {
+		return key
+	}
+	if newName, ok := l.opts.AttrMap[key]; ok {
+		return newName
+	}
+	return key
 }
