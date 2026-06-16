@@ -3,10 +3,9 @@ package scarylog
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"runtime"
-
-	"github.com/pkg/errors"
 )
 
 type Logger struct {
@@ -111,20 +110,25 @@ func newLoggerWithOptions(options *Options) *Logger {
 	}
 }
 
-func (l *Logger) Info(msg string, args ...any) {
+// wrap nests the given args inside the logger's group when one is configured,
+// so every leveled method shares identical grouping behavior.
+func (l *Logger) wrap(args []any) []any {
 	if l.groupName != "" && len(args) > 0 {
-		l.logger.Info(msg, slog.Group(l.groupName, args...))
-	} else {
-		l.logger.Info(msg, args...)
+		return []any{slog.Group(l.groupName, args...)}
 	}
+	return args
+}
+
+func (l *Logger) Info(msg string, args ...any) {
+	l.logger.Info(msg, l.wrap(args)...)
 }
 
 func (l *Logger) Warn(msg string, args ...any) {
-	if l.groupName != "" && len(args) > 0 {
-		l.logger.Warn(msg, slog.Group(l.groupName, args...))
-	} else {
-		l.logger.Warn(msg, args...)
-	}
+	l.logger.Warn(msg, l.wrap(args)...)
+}
+
+func (l *Logger) Debug(msg string, args ...any) {
+	l.logger.Debug(msg, l.wrap(args)...)
 }
 
 func caller(skip int) string {
@@ -135,36 +139,28 @@ func caller(skip int) string {
 	return fmt.Sprintf("%s:%d", file, line)
 }
 
-func (l *Logger) Error(msg string, err error, args ...any) {
-	// If msg is empty, use the error message
-	if msg == "" {
-		msg = err.Error()
+// Error logs err at the error level. The error itself is the message, so add
+// context by wrapping it at the call site, e.g. fmt.Errorf("save user: %w", err).
+// If err implements fmt.Formatter and renders a stack trace under %+v (as
+// github.com/pkg/errors or cockroachdb/errors do), that stack is attached.
+func (l *Logger) Error(err error, args ...any) {
+	if err == nil {
+		l.logger.Error("Error called with nil error", append([]any{"caller", caller(2)}, l.wrap(args)...)...)
+		return
 	}
 
 	allArgs := []any{
-		"message", err,
 		"caller", caller(2),
 	}
 
-	st, ok := err.(interface{ StackTrace() errors.StackTrace })
-	if ok {
-		allArgs = append(allArgs, "stack", fmt.Sprintf("%+v", st))
+	if _, ok := err.(fmt.Formatter); ok {
+		if s := fmt.Sprintf("%+v", err); s != err.Error() {
+			allArgs = append(allArgs, slog.String("stack", s))
+		}
 	}
 
-	if l.groupName != "" && len(args) > 0 {
-		allArgs = append(allArgs, slog.Group(l.groupName, args...))
-	} else {
-		allArgs = append(allArgs, args...)
-	}
-	l.logger.Error(msg, allArgs...)
-}
-
-func (l *Logger) Debug(msg string, args ...any) {
-	if l.groupName != "" && len(args) > 0 {
-		l.logger.Debug(msg, slog.Group(l.groupName, args...))
-	} else {
-		l.logger.Debug(msg, args...)
-	}
+	allArgs = append(allArgs, l.wrap(args)...)
+	l.logger.Error(err.Error(), allArgs...)
 }
 
 func (l *Logger) With(args ...any) *Logger {
@@ -205,25 +201,13 @@ func (l *Logger) WithOverwrite(args ...any) *Logger {
 	newAttrsMap := parseArgsToMap(args)
 
 	// 2. Merge maps. New attributes overwrite old ones.
-	for k, v := range newAttrsMap {
-		oldAttrsMap[k] = v
-	}
+	maps.Copy(oldAttrsMap, newAttrsMap)
 
 	// 3. Convert the merged map back to a slice of any for the logger.
-	finalAttrs := make([]any, 0, len(oldAttrsMap))
-	for _, v := range oldAttrsMap {
+	finalAttrs := make([]any, 0, len(oldAttrsMap)*2)
+	for k, v := range oldAttrsMap {
 		// If the value is an Attr struct (like a group), add it directly.
 		// Otherwise, reconstruct the key-value pair.
-		if attr, ok := v.(slog.Attr); ok {
-			finalAttrs = append(finalAttrs, attr)
-		} else {
-			// This branch is less likely if keys are unique, but handles the general case.
-			// We need a key for this. Let's iterate the map properly.
-		}
-	}
-	// A better way to convert map back to slice
-	finalAttrs = make([]any, 0, len(oldAttrsMap)*2)
-	for k, v := range oldAttrsMap {
 		if attr, ok := v.(slog.Attr); ok {
 			finalAttrs = append(finalAttrs, attr)
 		} else {
@@ -231,17 +215,18 @@ func (l *Logger) WithOverwrite(args ...any) *Logger {
 		}
 	}
 
-	// 4. Create a new Options struct for the new logger.
+	// 4. Create a new Options struct for the new logger, preserving all settings
+	// including any custom handler.
 	newOptions := &Options{
 		Level:        l.opts.Level,
 		DefaultAttrs: finalAttrs,
 		GroupName:    l.opts.GroupName,
 		AttrMap:      l.opts.AttrMap,
 		TimeFormat:   l.opts.TimeFormat,
+		Handler:      l.opts.Handler,
 	}
 
 	return newLoggerWithOptions(newOptions)
-
 }
 
 // Group returns a new logger that directs its output to the specified group.

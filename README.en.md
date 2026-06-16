@@ -7,5 +7,5 @@ This project `scarylog` is a Go module designed to provide a convenient wrapper 
 To install the package, run:
 
 ```bash
-  go get github.com/scarymovie/scarylog
+  go get github.com/scarymovie/scarylog/v2
 ```

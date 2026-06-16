@@ -9,5 +9,5 @@
 Для установки пакета выполните:
 
 ```bash
-  go get github.com/scarymovie/scarylog
+  go get github.com/scarymovie/scarylog/v2
 ```
