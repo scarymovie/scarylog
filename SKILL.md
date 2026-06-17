@@ -90,6 +90,15 @@ key := logger.GetAttrName("level")          // "severity" if remapped, else "lev
 
 ## Context Integration
 
+There are two complementary, opposite-direction mechanisms — don't confuse them:
+
+1. **Logger *in* context** (`ToContext`/`FromContext`): store a logger value in a
+   `context.Context` so request-scoped loggers can be retrieved downstream.
+2. **Context *into* the log call** (`InfoContext`/`WarnContext`/`DebugContext`/
+   `ErrorContext`): forward the `context.Context` to the slog handler, so
+   context-aware handlers can enrich the record from request-scoped values
+   (e.g. OpenTelemetry trace correlation).
+
 ### Storing Logger in Context
 ```go
 // Add logger to context
@@ -99,6 +108,43 @@ ctx := scarylog.ToContext(ctx, logger)
 log := scarylog.FromContext(ctx)
 log.Info("processing request")
 ```
+
+### Context-aware logging methods
+Use the `*Context` variants when you want the handler to see your `ctx`. The plain
+methods (`Info`/`Warn`/`Debug`/`Error`) pass an empty `context.Background()`, so a
+context-aware handler won't see request-scoped values:
+```go
+log := scarylog.FromContext(ctx)
+log.InfoContext(ctx, "processing request", "user_id", 42)
+log.ErrorContext(ctx, fmt.Errorf("save user: %w", err))
+```
+The plain methods remain for code where no `ctx` is available (init, background
+jobs, CLI). They are not deprecated.
+
+## HTTP Middleware (`scaryhttp`)
+
+`scaryhttp` provides stdlib-only `net/http` middleware that, per request: reads or
+generates an `X-Request-ID`, attaches a request-scoped logger to the context,
+echoes the id on the response, and logs the request lifecycle (status, latency).
+```go
+import (
+    "github.com/scarymovie/scarylog/v2"
+    "github.com/scarymovie/scarylog/v2/scaryhttp"
+)
+
+base := scarylog.NewLogger()
+mux := http.NewServeMux()
+// ... register handlers ...
+srv := scaryhttp.Middleware(base)(mux)
+
+// Inside any handler, pull the request-scoped logger (carries request_id):
+func handler(w http.ResponseWriter, r *http.Request) {
+    log := scarylog.FromContext(r.Context())
+    log.InfoContext(r.Context(), "handling")
+}
+```
+Options: `WithHeader`, `WithAttrKey`, `WithGenerator`, `WithLogStart`,
+`WithLevels`, `WithSkip` (e.g. skip health checks).
 
 ## Worker Pool Pattern: per-worker requestId via WithOverwrite
 

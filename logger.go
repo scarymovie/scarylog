@@ -1,11 +1,13 @@
 package scarylog
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"maps"
 	"os"
 	"runtime"
+	"strings"
 )
 
 type Logger struct {
@@ -119,16 +121,35 @@ func (l *Logger) wrap(args []any) []any {
 	return args
 }
 
+// log is the shared sink for every leveled method. It forwards the given
+// context.Context to slog so context-aware handlers (e.g. trace correlation)
+// can enrich the record from request-scoped values in ctx.
+func (l *Logger) log(ctx context.Context, level slog.Level, msg string, args ...any) {
+	l.logger.Log(ctx, level, msg, l.wrap(args)...)
+}
+
 func (l *Logger) Info(msg string, args ...any) {
-	l.logger.Info(msg, l.wrap(args)...)
+	l.log(context.Background(), slog.LevelInfo, msg, args...)
+}
+
+func (l *Logger) InfoContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, slog.LevelInfo, msg, args...)
 }
 
 func (l *Logger) Warn(msg string, args ...any) {
-	l.logger.Warn(msg, l.wrap(args)...)
+	l.log(context.Background(), slog.LevelWarn, msg, args...)
+}
+
+func (l *Logger) WarnContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, slog.LevelWarn, msg, args...)
 }
 
 func (l *Logger) Debug(msg string, args ...any) {
-	l.logger.Debug(msg, l.wrap(args)...)
+	l.log(context.Background(), slog.LevelDebug, msg, args...)
+}
+
+func (l *Logger) DebugContext(ctx context.Context, msg string, args ...any) {
+	l.log(ctx, slog.LevelDebug, msg, args...)
 }
 
 func caller(skip int) string {
@@ -136,7 +157,21 @@ func caller(skip int) string {
 	if !ok {
 		return "unknown"
 	}
-	return fmt.Sprintf("%s:%d", file, line)
+	return fmt.Sprintf("%s:%d", shortPath(file), line)
+}
+
+// shortPath trims an absolute path down to its last two segments
+// (e.g. "pkg/file.go"), so caller attributes don't leak the build
+// machine's filesystem layout and read like slog's own source field.
+func shortPath(file string) string {
+	idx := strings.LastIndexByte(file, '/')
+	if idx < 0 {
+		return file
+	}
+	if prev := strings.LastIndexByte(file[:idx], '/'); prev >= 0 {
+		return file[prev+1:]
+	}
+	return file
 }
 
 // Error logs err at the error level. The error itself is the message, so add
@@ -144,13 +179,24 @@ func caller(skip int) string {
 // If err implements fmt.Formatter and renders a stack trace under %+v (as
 // github.com/pkg/errors or cockroachdb/errors do), that stack is attached.
 func (l *Logger) Error(err error, args ...any) {
+	l.errorLog(context.Background(), err, caller(2), args...)
+}
+
+// ErrorContext behaves like Error but forwards ctx to the handler.
+func (l *Logger) ErrorContext(ctx context.Context, err error, args ...any) {
+	l.errorLog(ctx, err, caller(2), args...)
+}
+
+// errorLog is the shared implementation for Error/ErrorContext. callerStr is
+// captured by the public method so the reported caller is the user's call site.
+func (l *Logger) errorLog(ctx context.Context, err error, callerStr string, args ...any) {
 	if err == nil {
-		l.logger.Error("Error called with nil error", append([]any{"caller", caller(2)}, l.wrap(args)...)...)
+		l.logger.Log(ctx, slog.LevelError, "Error called with nil error", append([]any{"caller", callerStr}, l.wrap(args)...)...)
 		return
 	}
 
 	allArgs := []any{
-		"caller", caller(2),
+		"caller", callerStr,
 	}
 
 	if _, ok := err.(fmt.Formatter); ok {
@@ -160,14 +206,18 @@ func (l *Logger) Error(err error, args ...any) {
 	}
 
 	allArgs = append(allArgs, l.wrap(args)...)
-	l.logger.Error(err.Error(), allArgs...)
+	l.logger.Log(ctx, slog.LevelError, err.Error(), allArgs...)
 }
 
 func (l *Logger) With(args ...any) *Logger {
+	// Mirror the new attrs into a fresh Options so that attribute readers
+	// (GetAttr/GetString) see them too, without mutating the shared opts.
+	newOpts := *l.opts
+	newOpts.DefaultAttrs = append(append([]any{}, l.opts.DefaultAttrs...), args...)
 	return &Logger{
 		logger:    l.logger.With(args...),
 		groupName: l.groupName,
-		opts:      l.opts,
+		opts:      &newOpts,
 	}
 }
 
@@ -242,12 +292,28 @@ func (l *Logger) Group(name string) *Logger {
 
 // GetAttr retrieves an attribute value from the logger's DefaultAttrs by key.
 // Returns the value and true if found, or nil and false if not found.
+// It handles both key-value pairs (string, any) and slog.Attr entries, so it
+// stays correct regardless of whether the attr was added via WithDefaultAttrs,
+// With, or WithOverwrite.
 func (l *Logger) GetAttr(key string) (any, bool) {
-	for i := 0; i < len(l.opts.DefaultAttrs); i += 2 {
-		if k, ok := l.opts.DefaultAttrs[i].(string); ok {
-			if k == key {
-				return l.opts.DefaultAttrs[i+1], true
+	args := l.opts.DefaultAttrs
+	for i := 0; i < len(args); {
+		switch v := args[i].(type) {
+		case string:
+			if i+1 >= len(args) {
+				return nil, false
 			}
+			if v == key {
+				return args[i+1], true
+			}
+			i += 2
+		case slog.Attr:
+			if v.Key == key {
+				return v.Value.Any(), true
+			}
+			i++
+		default:
+			i++
 		}
 	}
 	return nil, false

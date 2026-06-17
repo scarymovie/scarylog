@@ -11,3 +11,19 @@
 ```bash
   go get github.com/scarymovie/scarylog/v2
 ```
+
+## Возможности
+
+- Уровневые методы `Info`/`Warn`/`Debug`/`Error` и их контекстные варианты
+  `InfoContext`/`WarnContext`/`DebugContext`/`ErrorContext`, прокидывающие `ctx`
+  в обработчик (для context-aware хендлеров, например trace-корреляции).
+- Автоматический захват caller и стек-трейса на ошибках.
+- Группировка, перезапись и чтение атрибутов, проброс логгера через `context.Context`.
+- HTTP middleware в подпакете [`scaryhttp`](scaryhttp/) — авто-`X-Request-ID`,
+  request-scoped логгер в контексте и лог жизненного цикла запроса. Только stdlib.
+
+Подробное руководство по использованию — в [`SKILL.md`](SKILL.md).
+
+## Лицензия
+
+[MIT](LICENSE)

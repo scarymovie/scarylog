@@ -12,10 +12,16 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 ## Layout
 
 - `logger.go` — `Logger`, functional `Option`s (`WithLevel`, `WithHandler`,
-  `WithDefaultAttrs`, `WithGroup`, `WithAttrRemapping`, `WithTimeFormat`), and the
-  leveled methods (`Info`/`Warn`/`Debug`/`Error`), plus `With`, `WithOverwrite`, `Group`.
+  `WithDefaultAttrs`, `WithGroup`, `WithAttrRemapping`, `WithTimeFormat`), the leveled
+  methods (`Info`/`Warn`/`Debug`/`Error`) and their context-aware variants
+  (`InfoContext`/`WarnContext`/`DebugContext`/`ErrorContext`, which forward `ctx` to the
+  handler), plus `With`, `WithOverwrite`, `Group`.
+- `doc.go` — package-level godoc overview.
 - `context.go` — `ToContext` / `FromContext` (returns a shared lazy default logger
   when none is in the context, never nil, never panics).
+- `scaryhttp/` — stdlib-only `net/http` middleware (`Middleware`) that attaches a
+  per-request id + request-scoped logger and logs the request lifecycle. Same module,
+  no third-party deps.
 - `logger_test.go` — table/behavioral tests; output is asserted by parsing the JSON
   records the handler emits.
 - `SKILL.md` — AI-assistant usage guide for this library (shipped with the repo).

@@ -371,3 +371,105 @@ func TestFromContextDefaultSingleton(t *testing.T) {
 		t.Errorf("FromContext default should be a shared singleton")
 	}
 }
+
+// ctxAttrKey is a context key used by ctxAttrHandler in the tests below.
+type ctxAttrKey string
+
+// ctxAttrHandler is a context-aware handler: it pulls a request-scoped value out
+// of ctx and adds it to the record, modelling trace correlation. It only sees
+// that value when a real ctx is forwarded (i.e. via the *Context methods).
+type ctxAttrHandler struct {
+	slog.Handler
+	key ctxAttrKey
+}
+
+func (h ctxAttrHandler) Handle(ctx context.Context, r slog.Record) error {
+	if v, ok := ctx.Value(h.key).(string); ok {
+		r.AddAttrs(slog.String("from_ctx", v))
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func TestContextForwardedToHandler(t *testing.T) {
+	buf := &bytes.Buffer{}
+	key := ctxAttrKey("trace")
+	h := ctxAttrHandler{
+		Handler: slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		key:     key,
+	}
+	l := NewLogger(WithHandler(h))
+	ctx := context.WithValue(context.Background(), key, "abc-123")
+
+	cases := []struct {
+		name string
+		log  func()
+	}{
+		{"InfoContext", func() { l.InfoContext(ctx, "hi") }},
+		{"WarnContext", func() { l.WarnContext(ctx, "hi") }},
+		{"DebugContext", func() { l.DebugContext(ctx, "hi") }},
+		{"ErrorContext", func() { l.ErrorContext(ctx, errors.New("boom")) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf.Reset()
+			c.log()
+			m := decode(t, buf)
+			if m["from_ctx"] != "abc-123" {
+				t.Errorf("%s did not forward ctx to handler: from_ctx = %v", c.name, m["from_ctx"])
+			}
+		})
+	}
+
+	// The non-context methods must NOT carry request-scoped ctx values.
+	buf.Reset()
+	l.Info("hi")
+	if m := decode(t, buf); m["from_ctx"] != nil {
+		t.Errorf("Info should not forward request-scoped ctx value, got %v", m["from_ctx"])
+	}
+}
+
+func TestCallerShortPath(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.Error(errors.New("x"))
+	m := decode(t, buf)
+
+	c, ok := m["caller"].(string)
+	if !ok {
+		t.Fatalf("missing caller attr")
+	}
+	if strings.HasPrefix(c, "/") {
+		t.Errorf("caller should be a short path, got absolute %q", c)
+	}
+	if !strings.Contains(c, "logger_test.go:") {
+		t.Errorf("caller = %q, want it to reference the call-site file", c)
+	}
+}
+
+func TestGetAttrAfterWith(t *testing.T) {
+	l, _ := newTestLogger(t, WithDefaultAttrs("traceId", "t1"))
+	child := l.With("requestId", "r1")
+
+	if v, ok := child.GetAttr("requestId"); !ok || v != "r1" {
+		t.Errorf("GetAttr(requestId) after With = %v, %v; want r1, true", v, ok)
+	}
+	if v, ok := child.GetAttr("traceId"); !ok || v != "t1" {
+		t.Errorf("GetAttr(traceId) after With = %v, %v; want t1, true (inherited)", v, ok)
+	}
+	if _, ok := l.GetAttr("requestId"); ok {
+		t.Errorf("parent logger should not see child's With attr")
+	}
+}
+
+func TestGetAttrHandlesSlogAttr(t *testing.T) {
+	// WithOverwrite stores slog.Attr values as single elements; GetAttr must
+	// still resolve them rather than misaligning the key-value stride.
+	l, _ := newTestLogger(t, WithDefaultAttrs("env", "dev"))
+	l2 := l.WithOverwrite(slog.String("region", "eu"))
+
+	if v, ok := l2.GetAttr("region"); !ok || v != "eu" {
+		t.Errorf("GetAttr(region) = %v, %v; want eu, true", v, ok)
+	}
+	if v, ok := l2.GetAttr("env"); !ok || v != "dev" {
+		t.Errorf("GetAttr(env) = %v, %v; want dev, true", v, ok)
+	}
+}
