@@ -9,6 +9,9 @@
 //	logger.Info("server started", "port", 8080)
 //	logger.Error(fmt.Errorf("save user: %w", err), "user_id", 42)
 //
+// WithSource adds slog's source attribute; it reports the caller's file and
+// line, not a frame inside this package.
+//
 // The error passed to Error becomes the log message; add context by wrapping it
 // at the call site rather than passing a separate message string. Passing nil is
 // safe. If the error, or any error it wraps, renders a stack trace under %+v,

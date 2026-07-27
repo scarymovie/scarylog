@@ -12,7 +12,8 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 ## Layout
 
 - `logger.go` — `Logger`, functional `Option`s (`WithLevel`, `WithHandler`,
-  `WithWriter`, `WithDefaultAttrs`, `WithGroup`, `WithAttrRemapping`, `WithTimeFormat`),
+  `WithWriter`, `WithDefaultAttrs`, `WithGroup`, `WithAttrRemapping`, `WithTimeFormat`,
+  `WithSource`),
   the leveled methods (`Info`/`Warn`/`Debug`/`Error`/`ErrorMsg`) and their context-aware
   variants (`InfoContext`/`WarnContext`/`DebugContext`/`ErrorContext`/`ErrorMsgContext`,
   which forward `ctx` to the handler), the level-generic `Log`/`Enabled`, plus `With`,
@@ -51,6 +52,13 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 - **`Error(err error, args ...any)`** — the error is the first arg and becomes the
   log message. Add context by wrapping (`fmt.Errorf("...: %w", err)`), not a separate
   message string. Passing `nil` is safe.
+- **Never call `slog.Logger.Log` to emit.** It records the PC of *its* caller —
+  this package — so `AddSource` would label every record with a frame inside
+  scarylog. All logging funnels through `Logger.emit`, which captures the PC
+  itself using `callerSkip`. That constant assumes every public method reaches
+  `emit` through exactly one helper (`log`, `errorLog` or `errorMsgLog`); adding
+  or removing a frame on any of those paths silently moves the reported source.
+  `TestSourcePointsAtCallSite` pins the depth for every public method.
 - Tests assert on parsed JSON output via a custom handler writing to a buffer; for
   options that only affect the built-in stdout handler (`WithLevel`,
   `WithAttrRemapping`, `WithTimeFormat`), capture `os.Stdout` (see `captureStdout`).

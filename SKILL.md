@@ -300,6 +300,7 @@ other options can still do:
 | `WithLevel` | applied — an explicit level wins over the handler's own |
 | `WithAttrRemapping` | applies to **your** attributes only |
 | `WithTimeFormat` | applies to attributes of kind `time`, not the record's timestamp |
+| `WithSource` | not applied — set `AddSource` in your own `slog.HandlerOptions` |
 
 The record's own `time`/`level`/`msg` keys are written by the supplied handler
 through its `ReplaceAttr`, which nothing outside that handler can reach. To remap
@@ -334,6 +335,20 @@ logger := scarylog.NewLogger(
     scarylog.WithTimeFormat("2006-01-02 15:04:05"),
 )
 ```
+
+### Source location
+```go
+logger := scarylog.NewLogger(scarylog.WithSource(true))
+logger.Info("started") // {"source":{"function":"main.main","file":"/app/main.go","line":18},...}
+```
+`source` points at **your** call site, not inside scarylog, for every method
+(`Info`/`Warn`/`Debug`/`Log`/`Error`/`ErrorMsg` and their `*Context` variants).
+With a handler of your own, set `AddSource` in its `slog.HandlerOptions` instead —
+the call site is reported correctly either way.
+
+This is separate from the `caller` attribute that `Error`/`ErrorMsg` always add:
+`caller` is a short `pkg/file.go:line` string, `source` is slog's structured
+attribute and covers every level.
 
 ## Best Practices
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -857,5 +858,129 @@ func TestErrorMsgStackSurvivesWrapping(t *testing.T) {
 	}
 	if m["msg"] != "send message failed" {
 		t.Errorf("msg = %v, want the stable message", m["msg"])
+	}
+}
+
+// --- v2.1.2: AddSource points at the call site ------------------------------
+
+// here returns the line number of its own call site.
+func here() int {
+	_, _, line, _ := runtime.Caller(1)
+	return line
+}
+
+// sourceOf pulls the source attribute slog writes when AddSource is on.
+func sourceOf(t *testing.T, m map[string]any) (file string, line int, fn string) {
+	t.Helper()
+	src, ok := m["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("record has no source attribute: %v", m)
+	}
+	f, _ := src["file"].(string)
+	n, _ := src["line"].(float64)
+	name, _ := src["function"].(string)
+	return f, int(n), name
+}
+
+// Every public logging method must report the caller's file and line, not a
+// frame inside scarylog. slog.Logger.Log captures the PC of *its* caller, so a
+// wrapper that forwards to it labels every record with the wrapper's own line;
+// emit captures the PC itself, and callerSkip has to be right for each path.
+//
+// Each case keeps the logging call and here() on one source line, so the
+// expected line number is computed rather than hardcoded.
+func TestSourcePointsAtCallSite(t *testing.T) {
+	ctx := context.Background()
+	stackErr := &stackError{msg: "kaboom"}
+
+	cases := []struct {
+		name string
+		// call logs exactly one record and returns its own line number.
+		call func(l *Logger) int
+	}{
+		{"Info", func(l *Logger) int { l.Info("m"); return here() }},
+		{"InfoContext", func(l *Logger) int { l.InfoContext(ctx, "m"); return here() }},
+		{"Warn", func(l *Logger) int { l.Warn("m"); return here() }},
+		{"WarnContext", func(l *Logger) int { l.WarnContext(ctx, "m"); return here() }},
+		{"Debug", func(l *Logger) int { l.Debug("m"); return here() }},
+		{"DebugContext", func(l *Logger) int { l.DebugContext(ctx, "m"); return here() }},
+		{"Log", func(l *Logger) int { l.Log(ctx, slog.LevelInfo, "m"); return here() }},
+		{"Error", func(l *Logger) int { l.Error(stackErr); return here() }},
+		{"ErrorContext", func(l *Logger) int { l.ErrorContext(ctx, stackErr); return here() }},
+		{"Error(nil)", func(l *Logger) int { l.Error(nil); return here() }},
+		{"ErrorMsg", func(l *Logger) int { l.ErrorMsg("m", stackErr); return here() }},
+		{"ErrorMsgContext", func(l *Logger) int { l.ErrorMsgContext(ctx, "m", stackErr); return here() }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			l := NewLogger(WithWriter(buf), WithLevel(slog.LevelDebug), WithSource(true))
+
+			want := tc.call(l)
+
+			file, line, fn := sourceOf(t, decode(t, buf))
+			if !strings.HasSuffix(file, "logger_test.go") {
+				t.Errorf("source.file = %q, want the caller's file, not a frame inside scarylog", file)
+			}
+			if line != want {
+				t.Errorf("source.line = %d, want %d (the logging call site)", line, want)
+			}
+			if !strings.Contains(fn, "TestSourcePointsAtCallSite") {
+				t.Errorf("source.function = %q, want this test's closure", fn)
+			}
+		})
+	}
+}
+
+// The reported source must survive the derived-logger constructors, which
+// rebuild the underlying slog.Logger.
+func TestSourceThroughDerivedLoggers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		derive func(*Logger) *Logger
+	}{
+		{"With", func(l *Logger) *Logger { return l.With("k", "v") }},
+		{"WithOverwrite", func(l *Logger) *Logger { return l.WithOverwrite("k", "v") }},
+		{"Group", func(l *Logger) *Logger { return l.Group("g") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			l := tc.derive(NewLogger(WithWriter(buf), WithSource(true)))
+
+			l.Info("m")
+			want := here()
+
+			file, line, _ := sourceOf(t, decode(t, buf))
+			if !strings.HasSuffix(file, "logger_test.go") || line != want-1 {
+				t.Errorf("source = %s:%d, want logger_test.go:%d", file, line, want-1)
+			}
+		})
+	}
+}
+
+// AddSource on a handler supplied through WithHandler must work too — that is
+// how a consumer plugs in their own sink.
+func TestSourceWithSuppliedHandler(t *testing.T) {
+	buf := &bytes.Buffer{}
+	h := slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: true})
+	l := NewLogger(WithHandler(h))
+
+	l.Info("m")
+	want := here()
+
+	file, line, _ := sourceOf(t, decode(t, buf))
+	if !strings.HasSuffix(file, "logger_test.go") || line != want-1 {
+		t.Errorf("source = %s:%d, want logger_test.go:%d", file, line, want-1)
+	}
+}
+
+// Without WithSource there must be no source attribute at all.
+func TestSourceOffByDefault(t *testing.T) {
+	buf := &bytes.Buffer{}
+	NewLogger(WithWriter(buf)).Info("m")
+
+	if _, ok := decode(t, buf)["source"]; ok {
+		t.Errorf("source attribute present without WithSource")
 	}
 }

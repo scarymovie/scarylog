@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 )
 
 type Logger struct {
@@ -31,6 +32,7 @@ type Options struct {
 	TimeFormat   string
 	Handler      slog.Handler
 	Writer       io.Writer
+	AddSource    bool
 }
 
 type Option func(*Options)
@@ -88,6 +90,16 @@ func WithTimeFormat(timeFormat string) Option {
 	}
 }
 
+// WithSource adds a "source" attribute with the file, line and function of the
+// call site to every record. It configures the built-in handler; a handler
+// supplied through WithHandler decides this for itself via its own
+// slog.HandlerOptions.AddSource.
+func WithSource(enabled bool) Option {
+	return func(o *Options) {
+		o.AddSource = enabled
+	}
+}
+
 func NewLogger(opts ...Option) *Logger {
 	options := &Options{}
 
@@ -131,7 +143,7 @@ func buildHandler(o *Options) slog.Handler {
 		level = slog.LevelInfo
 	}
 
-	handlerOpts := &slog.HandlerOptions{Level: level}
+	handlerOpts := &slog.HandlerOptions{Level: level, AddSource: o.AddSource}
 	if len(o.AttrMap) > 0 || o.TimeFormat != "" {
 		handlerOpts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
 			if newKey, ok := o.AttrMap[a.Key]; ok {
@@ -158,19 +170,47 @@ func (l *Logger) wrap(args []any) []any {
 	return args
 }
 
+// callerSkip is the runtime.Callers skip that lands on the user's call site:
+// 0 is runtime.Callers, 1 is emit, 2 is the internal helper that called it
+// (log, errorLog or errorMsgLog), 3 is the public method, 4 is the caller.
+//
+// Every public logging method must therefore reach emit through exactly one
+// helper. Adding or removing a frame on any of those paths silently moves the
+// reported source, so the depth is asserted in the tests.
+const callerSkip = 4
+
+// emit builds the record and hands it to the handler.
+//
+// It captures the program counter here rather than calling slog.Logger.Log,
+// which would record its own caller — this package — and make every record's
+// source point inside scarylog instead of at the code that logged. This is the
+// standard obligation of anything that wraps slog.
+func (l *Logger) emit(ctx context.Context, level slog.Level, msg string, args []any) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !l.logger.Enabled(ctx, level) {
+		return
+	}
+
+	var pcs [1]uintptr
+	runtime.Callers(callerSkip, pcs[:])
+
+	r := slog.NewRecord(time.Now(), level, msg, pcs[0])
+	r.Add(args...)
+	_ = l.logger.Handler().Handle(ctx, r)
+}
+
 // log is the shared sink for every leveled method. It forwards the given
 // context.Context to slog so context-aware handlers (e.g. trace correlation)
 // can enrich the record from request-scoped values in ctx.
 func (l *Logger) log(ctx context.Context, level slog.Level, msg string, args ...any) {
-	l.logger.Log(ctx, level, msg, l.wrap(args)...)
+	l.emit(ctx, level, msg, l.wrap(args))
 }
 
 // Log records msg at an arbitrary level, for callers that compute the level at
 // runtime. ctx is forwarded to the handler.
 func (l *Logger) Log(ctx context.Context, level slog.Level, msg string, args ...any) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	l.log(ctx, level, msg, args...)
 }
 
@@ -292,7 +332,8 @@ func (l *Logger) ErrorContext(ctx context.Context, err error, args ...any) {
 // captured by the public method so the reported caller is the user's call site.
 func (l *Logger) errorLog(ctx context.Context, err error, callerStr string, args ...any) {
 	if err == nil {
-		l.logger.Log(ctx, slog.LevelError, "Error called with nil error", append([]any{"caller", callerStr}, l.wrap(args)...)...)
+		l.emit(ctx, slog.LevelError, "Error called with nil error",
+			append([]any{"caller", callerStr}, l.wrap(args)...))
 		return
 	}
 
@@ -305,7 +346,7 @@ func (l *Logger) errorLog(ctx context.Context, err error, callerStr string, args
 	}
 
 	allArgs = append(allArgs, l.wrap(args)...)
-	l.logger.Log(ctx, slog.LevelError, err.Error(), allArgs...)
+	l.emit(ctx, slog.LevelError, err.Error(), allArgs)
 }
 
 // ErrorMsg logs err at the error level under the stable message msg, putting the
@@ -336,7 +377,7 @@ func (l *Logger) errorMsgLog(ctx context.Context, msg string, err error, callerS
 	}
 
 	allArgs = append(allArgs, l.wrap(args)...)
-	l.logger.Log(ctx, slog.LevelError, msg, allArgs...)
+	l.emit(ctx, slog.LevelError, msg, allArgs)
 }
 
 func (l *Logger) With(args ...any) *Logger {
