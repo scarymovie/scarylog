@@ -43,7 +43,11 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 ## Conventions
 
 - **No third-party deps.** Keep `go.mod`'s require block empty (stdlib only). Stack
-  traces are detected via `fmt.Formatter` + `%+v`, not via any error library.
+  traces are detected via `fmt.Formatter` + `%+v`, not via any error library, and
+  `stackOf` walks the whole `Unwrap` chain (single and `[]error`) — `fmt.Errorf`
+  with `%w` returns a `*fmt.wrapError` that is not a `fmt.Formatter`, so checking
+  only the top error would disable stacks for the wrapping idiom this repo
+  documents.
 - **`Error(err error, args ...any)`** — the error is the first arg and becomes the
   log message. Add context by wrapping (`fmt.Errorf("...: %w", err)`), not a separate
   message string. Passing `nil` is safe.

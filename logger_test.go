@@ -798,3 +798,64 @@ func TestEnabled(t *testing.T) {
 		t.Errorf("Enabled(Error) = false on an Error-level logger")
 	}
 }
+
+// --- v2.1.1: stack traces survive wrapping ----------------------------------
+
+// selfWrap is a pathological error that wraps itself, guarding the chain walk
+// against spinning forever.
+type selfWrap struct{}
+
+func (selfWrap) Error() string { return "self" }
+func (selfWrap) Unwrap() error { return selfWrap{} }
+
+// fmt.Errorf("...: %w", err) returns *fmt.wrapError, which is not a
+// fmt.Formatter — so looking only at the top error loses the trace, and the
+// wrapping idiom this package documents would silently disable stacks.
+func TestErrorStackSurvivesWrapping(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantStack bool
+	}{
+		{"unwrapped", &stackError{msg: "kaboom"}, true},
+		{"wrapped once", fmt.Errorf("send: %w", &stackError{msg: "kaboom"}), true},
+		{"wrapped twice", fmt.Errorf("a: %w", fmt.Errorf("b: %w", &stackError{msg: "kaboom"})), true},
+		{"joined", errors.Join(errors.New("other"), &stackError{msg: "kaboom"}), true},
+		{"plain error", errors.New("boom"), false},
+		{"wrapped plain error", fmt.Errorf("send: %w", errors.New("boom")), false},
+		{"self-wrapping error", selfWrap{}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			l, buf := newTestLogger(t)
+			l.Error(tc.err)
+
+			m := decode(t, buf)
+			stack, ok := m["stack"].(string)
+			if ok != tc.wantStack {
+				t.Fatalf("stack present = %v, want %v (record: %v)", ok, tc.wantStack, m)
+			}
+			if tc.wantStack && !strings.Contains(stack, "main.go:42") {
+				t.Errorf("stack = %q, want it to contain the trace", stack)
+			}
+			// The message still carries the fully wrapped text.
+			if m["msg"] != tc.err.Error() {
+				t.Errorf("msg = %v, want %q", m["msg"], tc.err.Error())
+			}
+		})
+	}
+}
+
+func TestErrorMsgStackSurvivesWrapping(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.ErrorMsg("send message failed", fmt.Errorf("send: %w", &stackError{msg: "kaboom"}))
+
+	m := decode(t, buf)
+	if stack, ok := m["stack"].(string); !ok || !strings.Contains(stack, "main.go:42") {
+		t.Errorf("stack = %v, want the wrapped error's trace", m["stack"])
+	}
+	if m["msg"] != "send message failed" {
+		t.Errorf("msg = %v, want the stable message", m["msg"])
+	}
+}

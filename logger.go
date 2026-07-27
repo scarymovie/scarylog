@@ -229,14 +229,44 @@ func shortPath(file string) string {
 	return file
 }
 
-// stackOf returns err's stack trace when it renders one under %+v (as
-// github.com/pkg/errors or cockroachdb/errors do).
+// maxUnwrapDepth bounds the error chain walk in stackOf, so a self-referential
+// error can't spin forever.
+const maxUnwrapDepth = 100
+
+// stackOf returns a stack trace rendered by err or by any error it wraps.
+//
+// Stack-carrying error libraries (github.com/pkg/errors, cockroachdb/errors)
+// expose their trace through fmt.Formatter under %+v. Wrapping such an error
+// with fmt.Errorf("...: %w", err) hides it again: *fmt.wrapError does not
+// implement fmt.Formatter. Since wrapping is exactly what this package tells
+// callers to do for context, the whole chain is searched rather than only the
+// error on top — otherwise the documented idiom would silently disable stacks.
+//
+// The outermost trace wins: when several errors in the chain carry one, that is
+// the most complete. The returned text belongs to that error, not to the full
+// wrapped message — the record's message already carries err.Error() in full.
 func stackOf(err error) (string, bool) {
-	if _, ok := err.(fmt.Formatter); !ok {
-		return "", false
-	}
-	if s := fmt.Sprintf("%+v", err); s != err.Error() {
-		return s, true
+	for depth := 0; err != nil && depth < maxUnwrapDepth; depth++ {
+		if _, ok := err.(fmt.Formatter); ok {
+			if s := fmt.Sprintf("%+v", err); s != err.Error() {
+				return s, true
+			}
+		}
+
+		switch e := err.(type) {
+		case interface{ Unwrap() error }:
+			err = e.Unwrap()
+		case interface{ Unwrap() []error }:
+			// errors.Join and multi-error wrappers: first branch with a trace.
+			for _, sub := range e.Unwrap() {
+				if s, ok := stackOf(sub); ok {
+					return s, true
+				}
+			}
+			return "", false
+		default:
+			return "", false
+		}
 	}
 	return "", false
 }

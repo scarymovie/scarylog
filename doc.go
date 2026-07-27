@@ -11,7 +11,9 @@
 //
 // The error passed to Error becomes the log message; add context by wrapping it
 // at the call site rather than passing a separate message string. Passing nil is
-// safe. If the error renders a stack trace under %+v, that stack is attached.
+// safe. If the error, or any error it wraps, renders a stack trace under %+v,
+// that stack is attached — wrapping with fmt.Errorf("...: %w", err) does not
+// lose it.
 //
 // When the message feeds grouping or alerting, use ErrorMsg instead: it keeps the
 // message stable and low-cardinality and moves the error text into the "error"

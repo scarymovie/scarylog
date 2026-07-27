@@ -51,7 +51,11 @@ if err != nil {
 ```
 Passing `nil` is safe (it logs a placeholder, never panics). If the error renders
 a stack trace under `%+v` (e.g. `github.com/pkg/errors`, `cockroachdb/errors`),
-that stack is attached as a `stack` attribute automatically.
+that stack is attached as a `stack` attribute automatically — including when the
+error has been wrapped with `fmt.Errorf("...: %w", err)` or `errors.Join`, since
+the whole error chain is searched. Errors that carry no trace (`errors.New`,
+plain `fmt.Errorf`) produce no `stack` attribute; the `caller` attribute is
+always present regardless.
 
 #### ErrorMsg - Errors with a stable message
 `Error` makes the rendered error the message, so the message carries whatever
@@ -415,7 +419,7 @@ func (s *UserService) GetUser(ctx context.Context, id int) (*User, error) {
 ## Key Differences from Raw slog
 
 1. **Automatic caller tracking**: Error logs automatically include caller information
-2. **Stack trace capture**: Errors that render a trace under `%+v` (via `fmt.Formatter`) get a `stack` attribute automatically — no extra dependency required
+2. **Stack trace capture**: Errors that render a trace under `%+v` (via `fmt.Formatter`) get a `stack` attribute automatically, anywhere in the wrap chain — no extra dependency required
 3. **Group handling**: Simplified group-based attribute organization
 4. **Context integration**: Built-in context.Context support, plus a configurable
    application-wide fallback via `SetDefault`
