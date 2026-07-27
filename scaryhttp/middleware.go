@@ -17,31 +17,71 @@ import (
 // the response when one is generated.
 const DefaultRequestIDHeader = "X-Request-ID"
 
+// DefaultRequestIDAttrKey is the log attribute key the request id is logged under.
+const DefaultRequestIDAttrKey = "request_id"
+
+// CorrelationID describes one identifier the middleware propagates: it is read
+// from Header, generated when absent, echoed on the response and logged under
+// AttrKey. Generate overrides the shared generator for this id only.
+type CorrelationID struct {
+	Header   string
+	AttrKey  string
+	Generate func() string
+}
+
 // config holds the middleware settings, mutated through Option values.
 type config struct {
-	header      string
-	attrKey     string
+	ids         []CorrelationID
 	generate    func() string
 	startLevel  slog.Level
 	finishLevel slog.Level
 	logStart    bool
 	skip        func(*http.Request) bool
+	skipWrap    func(*http.Request) bool
 }
 
 // Option customizes the middleware.
 type Option func(*config)
 
 // WithHeader overrides the request-id header name (default "X-Request-ID").
+// It is sugar for the first correlation id; don't mix it with WithCorrelationIDs.
 func WithHeader(name string) Option {
-	return func(c *config) { c.header = name }
+	return func(c *config) {
+		if len(c.ids) > 0 {
+			c.ids[0].Header = name
+		}
+	}
 }
 
 // WithAttrKey overrides the log attribute key for the request id (default "request_id").
+// It is sugar for the first correlation id; don't mix it with WithCorrelationIDs.
 func WithAttrKey(key string) Option {
-	return func(c *config) { c.attrKey = key }
+	return func(c *config) {
+		if len(c.ids) > 0 {
+			c.ids[0].AttrKey = key
+		}
+	}
 }
 
-// WithGenerator overrides how a request id is generated when none is inbound.
+// WithCorrelationID adds another identifier alongside the ones already
+// configured — e.g. an inbound end-to-end "X-Trace-ID" next to the per-hop
+// "X-Request-ID". It may be applied several times.
+func WithCorrelationID(header, attrKey string) Option {
+	return func(c *config) {
+		c.ids = append(c.ids, CorrelationID{Header: header, AttrKey: attrKey})
+	}
+}
+
+// WithCorrelationIDs replaces the whole set of identifiers, including the
+// default request id.
+func WithCorrelationIDs(ids ...CorrelationID) Option {
+	return func(c *config) {
+		c.ids = append([]CorrelationID(nil), ids...)
+	}
+}
+
+// WithGenerator overrides how an id is generated when none is inbound. It
+// applies to every correlation id that doesn't carry its own Generate.
 func WithGenerator(fn func() string) Option {
 	return func(c *config) {
 		if fn != nil {
@@ -64,24 +104,43 @@ func WithLevels(start, finish slog.Level) Option {
 }
 
 // WithSkip skips middleware logging for requests where fn returns true
-// (e.g. health checks). The request-scoped logger is still attached.
+// (e.g. health checks). The request-scoped logger is still attached, and the
+// response writer is still wrapped — use WithSkipWrap for that.
 func WithSkip(fn func(*http.Request) bool) Option {
 	return func(c *config) { c.skip = fn }
 }
 
+// WithSkipWrap hands the handler the original http.ResponseWriter, unwrapped,
+// for requests where fn returns true. The request-scoped logger is still
+// attached and the lifecycle is still logged, but status and bytes are then
+// unknown and omitted.
+//
+// The middleware's wrapper already mirrors every optional interface of the
+// writer it wraps, so this is only needed for writers with capabilities beyond
+// http.Flusher, http.Hijacker, io.ReaderFrom and http.Pusher.
+func WithSkipWrap(fn func(*http.Request) bool) Option {
+	return func(c *config) { c.skipWrap = fn }
+}
+
 // Middleware returns net/http middleware that, for every request:
-//  1. reads the request-id header, generating one if absent;
-//  2. derives a request-scoped logger from base carrying the request id and
+//  1. reads each configured correlation-id header, generating one if absent;
+//  2. derives a request-scoped logger from base carrying those ids and
 //     stores it in the request context (retrieve it with scarylog.FromContext);
-//  3. echoes the request id back on the response header;
-//  4. logs the request lifecycle (status, latency) on finish.
+//  3. echoes the ids back on the response headers;
+//  4. logs the request lifecycle (status, latency) on finish, including when the
+//     handler panics.
+//
+// The response writer handed to the next handler implements exactly the optional
+// interfaces of the original, so WebSocket upgrades and streaming keep working.
 func Middleware(base *scarylog.Logger, opts ...Option) func(http.Handler) http.Handler {
 	if base == nil {
 		base = scarylog.NewLogger()
 	}
 	cfg := config{
-		header:      DefaultRequestIDHeader,
-		attrKey:     "request_id",
+		ids: []CorrelationID{{
+			Header:  DefaultRequestIDHeader,
+			AttrKey: DefaultRequestIDAttrKey,
+		}},
 		generate:    generateID,
 		startLevel:  slog.LevelInfo,
 		finishLevel: slog.LevelInfo,
@@ -92,64 +151,76 @@ func Middleware(base *scarylog.Logger, opts ...Option) func(http.Handler) http.H
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := r.Header.Get(cfg.header)
-			if id == "" {
-				id = cfg.generate()
+			attrs := make([]any, 0, len(cfg.ids)*2)
+			for _, id := range cfg.ids {
+				value := r.Header.Get(id.Header)
+				if value == "" {
+					generate := id.Generate
+					if generate == nil {
+						generate = cfg.generate
+					}
+					value = generate()
+				}
+				w.Header().Set(id.Header, value)
+				attrs = append(attrs, id.AttrKey, value)
 			}
-			w.Header().Set(cfg.header, id)
 
-			logger := base.With(cfg.attrKey, id)
+			// WithOverwrite, not With: the base logger may already carry these
+			// keys as default attrs, and slog would then emit each key twice.
+			logger := base.WithOverwrite(attrs...)
 			ctx := scarylog.ToContext(r.Context(), logger)
 			r = r.WithContext(ctx)
 
 			skip := cfg.skip != nil && cfg.skip(r)
 
 			if !skip && cfg.logStart {
-				logger.InfoContext(ctx, "request started",
+				logger.Log(ctx, cfg.startLevel, "request started",
 					"method", r.Method, "path", r.URL.Path)
 			}
 
-			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-			start := time.Now()
-			next.ServeHTTP(rec, r)
-
-			if !skip {
-				logger.InfoContext(ctx, "request finished",
-					"method", r.Method,
-					"path", r.URL.Path,
-					"status", rec.status,
-					"bytes", rec.written,
-					"latency_ms", time.Since(start).Milliseconds(),
-				)
+			var (
+				rec http.ResponseWriter = w
+				sr  *recorder
+			)
+			if cfg.skipWrap == nil || !cfg.skipWrap(r) {
+				sr, rec = wrapWriter(w)
 			}
+
+			start := time.Now()
+			completed := false
+
+			// Deferred so the request is still logged when the handler panics:
+			// that is the one request worth having in the log. The panic value is
+			// not recovered — it travels on to the application's recovery
+			// middleware with its stack intact.
+			defer func() {
+				if skip {
+					return
+				}
+				level := cfg.finishLevel
+				args := []any{"method", r.Method, "path", r.URL.Path}
+				switch {
+				case sr == nil:
+					// Writer left unwrapped by WithSkipWrap: nothing recorded.
+				case sr.hijacked:
+					// status/bytes describe the handshake, not the connection
+					// that took over; latency is the connection's lifetime.
+					args = append(args, "status", sr.status, "hijacked", true)
+				default:
+					args = append(args, "status", sr.status, "bytes", sr.written)
+				}
+				args = append(args, "latency_ms", time.Since(start).Milliseconds())
+				if !completed {
+					level = slog.LevelError
+					args = append(args, "panicked", true)
+				}
+				logger.Log(ctx, level, "request finished", args...)
+			}()
+
+			next.ServeHTTP(rec, r)
+			completed = true
 		})
 	}
-}
-
-// statusRecorder wraps http.ResponseWriter to capture the status code and the
-// number of bytes written for the finish log line.
-type statusRecorder struct {
-	http.ResponseWriter
-	status      int
-	written     int
-	wroteHeader bool
-}
-
-func (r *statusRecorder) WriteHeader(code int) {
-	if !r.wroteHeader {
-		r.status = code
-		r.wroteHeader = true
-	}
-	r.ResponseWriter.WriteHeader(code)
-}
-
-func (r *statusRecorder) Write(b []byte) (int, error) {
-	if !r.wroteHeader {
-		r.wroteHeader = true
-	}
-	n, err := r.ResponseWriter.Write(b)
-	r.written += n
-	return n, err
 }
 
 // generateID returns a random 16-byte hex string, using only the stdlib.

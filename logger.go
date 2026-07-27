@@ -3,26 +3,34 @@ package scarylog
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"runtime"
 	"strings"
 )
 
 type Logger struct {
-	logger    *slog.Logger
+	logger *slog.Logger
+	// root is the handler slog.New was built from. Keeping it lets WithOverwrite
+	// rebuild the attribute set on the same handler instead of constructing a
+	// fresh one on every call.
+	root      slog.Handler
 	groupName string
 	opts      *Options
 }
 
 type Options struct {
+	// Level is nil when the caller never passed WithLevel. The built-in handler
+	// then defaults to slog.LevelInfo; a handler supplied via WithHandler is left
+	// alone. An explicit level is honored in both cases.
 	Level        slog.Leveler
 	DefaultAttrs []any
 	GroupName    string
 	AttrMap      map[string]string
 	TimeFormat   string
 	Handler      slog.Handler
+	Writer       io.Writer
 }
 
 type Option func(*Options)
@@ -33,9 +41,26 @@ func WithLevel(level slog.Leveler) Option {
 	}
 }
 
+// WithHandler replaces the built-in handler entirely. The supplied handler owns
+// its own output format, so WithAttrRemapping and WithTimeFormat can only reach
+// the attributes scarylog passes it, never the handler's own time/level/msg keys
+// — those are set by the handler's ReplaceAttr, which scarylog cannot reach from
+// the outside. WithLevel is applied as an outer filter and does take effect.
+// To keep every option working, use WithWriter instead.
 func WithHandler(h slog.Handler) Option {
 	return func(o *Options) {
 		o.Handler = h
+	}
+}
+
+// WithWriter sends the built-in JSON handler's output to w instead of os.Stdout.
+// Unlike WithHandler it keeps every other option in effect (WithLevel,
+// WithAttrRemapping, WithTimeFormat), which makes it the right choice for tests.
+func WithWriter(w io.Writer) Option {
+	return func(o *Options) {
+		if w != nil {
+			o.Writer = w
+		}
 	}
 }
 
@@ -64,9 +89,7 @@ func WithTimeFormat(timeFormat string) Option {
 }
 
 func NewLogger(opts ...Option) *Logger {
-	options := &Options{
-		Level: slog.LevelInfo,
-	}
+	options := &Options{}
 
 	for _, opt := range opts {
 		opt(options)
@@ -76,40 +99,54 @@ func NewLogger(opts ...Option) *Logger {
 }
 
 func newLoggerWithOptions(options *Options) *Logger {
-	var handler slog.Handler
-	if options.Handler != nil {
-		handler = options.Handler
-	} else {
-		handlerOpts := &slog.HandlerOptions{
-			Level: options.Level,
-		}
+	root := buildHandler(options)
 
-		if len(options.AttrMap) > 0 || options.TimeFormat != "" {
-			handlerOpts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
-				if newKey, ok := options.AttrMap[a.Key]; ok {
-					a.Key = newKey
-				}
-
-				if a.Key == slog.TimeKey && options.TimeFormat != "" {
-					a.Value = slog.StringValue(a.Value.Time().Format(options.TimeFormat))
-				}
-
-				return a
-			}
-		}
-		handler = slog.NewJSONHandler(os.Stdout, handlerOpts)
-	}
-
-	slogLogger := slog.New(handler)
+	slogLogger := slog.New(root)
 	if len(options.DefaultAttrs) > 0 {
 		slogLogger = slogLogger.With(options.DefaultAttrs...)
 	}
 
 	return &Logger{
 		logger:    slogLogger,
+		root:      root,
 		groupName: options.GroupName,
 		opts:      options,
 	}
+}
+
+// buildHandler resolves the options into the handler the logger writes through:
+// either the caller's handler (wrapped so the options that *can* apply to it do)
+// or the built-in JSON handler with every option applied natively.
+func buildHandler(o *Options) slog.Handler {
+	if o.Handler != nil {
+		return wrapHandler(o.Handler, o)
+	}
+
+	w := o.Writer
+	if w == nil {
+		w = os.Stdout
+	}
+	level := o.Level
+	if level == nil {
+		level = slog.LevelInfo
+	}
+
+	handlerOpts := &slog.HandlerOptions{Level: level}
+	if len(o.AttrMap) > 0 || o.TimeFormat != "" {
+		handlerOpts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+			if newKey, ok := o.AttrMap[a.Key]; ok {
+				a.Key = newKey
+			}
+
+			if a.Key == slog.TimeKey && o.TimeFormat != "" {
+				a.Value = slog.StringValue(a.Value.Time().Format(o.TimeFormat))
+			}
+
+			return a
+		}
+	}
+
+	return slog.NewJSONHandler(w, handlerOpts)
 }
 
 // wrap nests the given args inside the logger's group when one is configured,
@@ -126,6 +163,24 @@ func (l *Logger) wrap(args []any) []any {
 // can enrich the record from request-scoped values in ctx.
 func (l *Logger) log(ctx context.Context, level slog.Level, msg string, args ...any) {
 	l.logger.Log(ctx, level, msg, l.wrap(args)...)
+}
+
+// Log records msg at an arbitrary level, for callers that compute the level at
+// runtime. ctx is forwarded to the handler.
+func (l *Logger) Log(ctx context.Context, level slog.Level, msg string, args ...any) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.log(ctx, level, msg, args...)
+}
+
+// Enabled reports whether a record at the given level would be handled. Use it
+// to skip building expensive attributes.
+func (l *Logger) Enabled(ctx context.Context, level slog.Level) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return l.logger.Enabled(ctx, level)
 }
 
 func (l *Logger) Info(msg string, args ...any) {
@@ -174,10 +229,26 @@ func shortPath(file string) string {
 	return file
 }
 
+// stackOf returns err's stack trace when it renders one under %+v (as
+// github.com/pkg/errors or cockroachdb/errors do).
+func stackOf(err error) (string, bool) {
+	if _, ok := err.(fmt.Formatter); !ok {
+		return "", false
+	}
+	if s := fmt.Sprintf("%+v", err); s != err.Error() {
+		return s, true
+	}
+	return "", false
+}
+
 // Error logs err at the error level. The error itself is the message, so add
 // context by wrapping it at the call site, e.g. fmt.Errorf("save user: %w", err).
 // If err implements fmt.Formatter and renders a stack trace under %+v (as
 // github.com/pkg/errors or cockroachdb/errors do), that stack is attached.
+//
+// Because the message is the fully rendered error, it carries whatever variable
+// data the error text contains. When you need a stable, low-cardinality message
+// for grouping and alerting, use ErrorMsg.
 func (l *Logger) Error(err error, args ...any) {
 	l.errorLog(context.Background(), err, caller(2), args...)
 }
@@ -199,23 +270,54 @@ func (l *Logger) errorLog(ctx context.Context, err error, callerStr string, args
 		"caller", callerStr,
 	}
 
-	if _, ok := err.(fmt.Formatter); ok {
-		if s := fmt.Sprintf("%+v", err); s != err.Error() {
-			allArgs = append(allArgs, slog.String("stack", s))
-		}
+	if s, ok := stackOf(err); ok {
+		allArgs = append(allArgs, slog.String("stack", s))
 	}
 
 	allArgs = append(allArgs, l.wrap(args)...)
 	l.logger.Log(ctx, slog.LevelError, err.Error(), allArgs...)
 }
 
+// ErrorMsg logs err at the error level under the stable message msg, putting the
+// error text in the "error" attribute instead of the message. Prefer it over
+// Error when the message feeds grouping or alerting: err.Error() usually embeds
+// variable data (addresses, ids, timeouts), which makes every record a distinct
+// message. Passing a nil err is safe — only msg is logged.
+func (l *Logger) ErrorMsg(msg string, err error, args ...any) {
+	l.errorMsgLog(context.Background(), msg, err, caller(2), args...)
+}
+
+// ErrorMsgContext behaves like ErrorMsg but forwards ctx to the handler.
+func (l *Logger) ErrorMsgContext(ctx context.Context, msg string, err error, args ...any) {
+	l.errorMsgLog(ctx, msg, err, caller(2), args...)
+}
+
+// errorMsgLog is the shared implementation for ErrorMsg/ErrorMsgContext.
+func (l *Logger) errorMsgLog(ctx context.Context, msg string, err error, callerStr string, args ...any) {
+	allArgs := []any{
+		"caller", callerStr,
+	}
+
+	if err != nil {
+		allArgs = append(allArgs, slog.String("error", err.Error()))
+		if s, ok := stackOf(err); ok {
+			allArgs = append(allArgs, slog.String("stack", s))
+		}
+	}
+
+	allArgs = append(allArgs, l.wrap(args)...)
+	l.logger.Log(ctx, slog.LevelError, msg, allArgs...)
+}
+
 func (l *Logger) With(args ...any) *Logger {
 	// Mirror the new attrs into a fresh Options so that attribute readers
-	// (GetAttr/GetString) see them too, without mutating the shared opts.
+	// (GetAttr/GetString) and WithOverwrite see them too, without mutating
+	// the shared opts.
 	newOpts := *l.opts
 	newOpts.DefaultAttrs = append(append([]any{}, l.opts.DefaultAttrs...), args...)
 	return &Logger{
 		logger:    l.logger.With(args...),
+		root:      l.root,
 		groupName: l.groupName,
 		opts:      &newOpts,
 	}
@@ -223,60 +325,85 @@ func (l *Logger) With(args ...any) *Logger {
 
 // WithOverwrite creates a new logger with the given attributes, overwriting any existing attributes with the same key.
 // It can handle attributes provided as key-value pairs (string, any), or as slog.Attr structs (including slog.Group).
+// Attribute order is preserved: an overwritten key keeps its original position,
+// and genuinely new keys are appended in the order given.
 func (l *Logger) WithOverwrite(args ...any) *Logger {
-	// Helper to parse different argument styles (string+any or slog.Attr) into a map.
-	parseArgsToMap := func(args []any) map[string]any {
-		attrs := make(map[string]any)
+	final := mergeAttrs(l.opts.DefaultAttrs, args)
+
+	newOpts := *l.opts
+	newOpts.DefaultAttrs = final
+	// Group() only sets the logger's field, so l.groupName — not opts.GroupName —
+	// is the group actually in force.
+	newOpts.GroupName = l.groupName
+
+	return &Logger{
+		// Rebuild on the same root handler: reconstructing it here would drop a
+		// custom handler's identity and allocate a new one on every call.
+		logger:    slog.New(l.root).With(final...),
+		root:      l.root,
+		groupName: l.groupName,
+		opts:      &newOpts,
+	}
+}
+
+// attrEntry is one merged attribute, kept in insertion order. Either a key/value
+// pair (isAttr false) or a slog.Attr, mirroring the two arg styles slog accepts.
+type attrEntry struct {
+	key    string
+	val    any
+	attr   slog.Attr
+	isAttr bool
+}
+
+// mergeAttrs merges overrides onto base by key, preserving the order in which
+// keys first appeared. Args in either style (string+any or slog.Attr) are
+// accepted; anything else is skipped, exactly as slog would.
+func mergeAttrs(base, overrides []any) []any {
+	entries := make([]attrEntry, 0, len(base)/2+len(overrides)/2)
+	index := make(map[string]int, len(base)/2+len(overrides)/2)
+
+	put := func(e attrEntry) {
+		if i, ok := index[e.key]; ok {
+			entries[i] = e
+			return
+		}
+		index[e.key] = len(entries)
+		entries = append(entries, e)
+	}
+
+	collect := func(args []any) {
 		for i := 0; i < len(args); {
 			switch v := args[i].(type) {
 			case string:
-				if i+1 < len(args) {
-					attrs[v] = args[i+1]
-					i += 2
-				} else {
+				if i+1 >= len(args) {
+					// Dangling key with no value: slog would log it as a
+					// "!BADKEY" record; drop it here as before.
 					i++
+					continue
 				}
+				put(attrEntry{key: v, val: args[i+1]})
+				i += 2
 			case slog.Attr:
-				attrs[v.Key] = v
+				put(attrEntry{key: v.Key, attr: v, isAttr: true})
 				i++
 			default:
 				i++
 			}
 		}
-		return attrs
 	}
 
-	// 1. Parse original and new arguments into maps.
-	oldAttrsMap := parseArgsToMap(l.opts.DefaultAttrs)
-	newAttrsMap := parseArgsToMap(args)
+	collect(base)
+	collect(overrides)
 
-	// 2. Merge maps. New attributes overwrite old ones.
-	maps.Copy(oldAttrsMap, newAttrsMap)
-
-	// 3. Convert the merged map back to a slice of any for the logger.
-	finalAttrs := make([]any, 0, len(oldAttrsMap)*2)
-	for k, v := range oldAttrsMap {
-		// If the value is an Attr struct (like a group), add it directly.
-		// Otherwise, reconstruct the key-value pair.
-		if attr, ok := v.(slog.Attr); ok {
-			finalAttrs = append(finalAttrs, attr)
+	out := make([]any, 0, len(entries)*2)
+	for _, e := range entries {
+		if e.isAttr {
+			out = append(out, e.attr)
 		} else {
-			finalAttrs = append(finalAttrs, k, v)
+			out = append(out, e.key, e.val)
 		}
 	}
-
-	// 4. Create a new Options struct for the new logger, preserving all settings
-	// including any custom handler.
-	newOptions := &Options{
-		Level:        l.opts.Level,
-		DefaultAttrs: finalAttrs,
-		GroupName:    l.opts.GroupName,
-		AttrMap:      l.opts.AttrMap,
-		TimeFormat:   l.opts.TimeFormat,
-		Handler:      l.opts.Handler,
-	}
-
-	return newLoggerWithOptions(newOptions)
+	return out
 }
 
 // Group returns a new logger that directs its output to the specified group.
@@ -285,6 +412,7 @@ func (l *Logger) Group(name string) *Logger {
 	// Create a shallow copy of the logger, but with a new group name.
 	return &Logger{
 		logger:    l.logger,
+		root:      l.root,
 		groupName: name,
 		opts:      l.opts,
 	}

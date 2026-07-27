@@ -13,6 +13,12 @@
 // at the call site rather than passing a separate message string. Passing nil is
 // safe. If the error renders a stack trace under %+v, that stack is attached.
 //
+// When the message feeds grouping or alerting, use ErrorMsg instead: it keeps the
+// message stable and low-cardinality and moves the error text into the "error"
+// attribute.
+//
+//	logger.ErrorMsg("send message failed", err, "user_id", 42)
+//
 // # Context propagation
 //
 // Two complementary mechanisms exist. ToContext/FromContext carry a logger value
@@ -24,8 +30,15 @@
 //	log := scarylog.FromContext(ctx)
 //	log.InfoContext(ctx, "processing request")
 //
+// Install the application's logger with SetDefault during startup so records that
+// miss the request-scoped logger still carry the application's attributes rather
+// than landing in a bare stdout logger. FromContextOK reports whether a logger was
+// actually present.
+//
 // # HTTP
 //
-// Subpackage scaryhttp provides net/http middleware that attaches a per-request
-// id and a request-scoped logger to every request and logs the request lifecycle.
+// Subpackage scaryhttp provides net/http middleware that attaches per-request
+// correlation ids and a request-scoped logger to every request and logs the
+// request lifecycle. The response writer it passes down mirrors the optional
+// interfaces of the original, so WebSocket upgrades and streaming keep working.
 package scarylog

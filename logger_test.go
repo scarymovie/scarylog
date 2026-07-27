@@ -473,3 +473,328 @@ func TestGetAttrHandlesSlogAttr(t *testing.T) {
 		t.Errorf("GetAttr(env) = %v, %v; want dev, true", v, ok)
 	}
 }
+
+// --- v2.1: SetDefault / Default / FromContextOK -----------------------------
+
+func TestSetDefaultAndDefault(t *testing.T) {
+	t.Cleanup(func() { SetDefault(nil) })
+
+	buf := &bytes.Buffer{}
+	app := NewLogger(WithWriter(buf), WithDefaultAttrs("service", "api", "version", "1.2.3"))
+	SetDefault(app)
+
+	if Default() != app {
+		t.Errorf("Default() did not return the logger installed with SetDefault")
+	}
+
+	// A context carrying no logger must fall back to the application logger,
+	// not to a bare stdout one that silently drops the app's attributes.
+	FromContext(context.Background()).Info("no logger in ctx")
+
+	m := decode(t, buf)
+	if m["service"] != "api" || m["version"] != "1.2.3" {
+		t.Errorf("fallback record lost the application attrs: %v", m)
+	}
+
+	SetDefault(nil)
+	if Default() == app {
+		t.Errorf("SetDefault(nil) did not restore the built-in default")
+	}
+	if Default() != Default() {
+		t.Errorf("built-in default should stay a shared singleton")
+	}
+}
+
+func TestFromContextOK(t *testing.T) {
+	l, _ := newTestLogger(t)
+
+	if _, ok := FromContextOK(context.Background()); ok {
+		t.Errorf("FromContextOK reported a logger in an empty context")
+	}
+
+	got, ok := FromContextOK(ToContext(context.Background(), l))
+	if !ok || got != l {
+		t.Errorf("FromContextOK = %v, %v; want the stored logger and true", got, ok)
+	}
+
+	var nilCtx context.Context
+	if _, ok := FromContextOK(nilCtx); ok {
+		t.Errorf("FromContextOK(nil ctx) reported a logger")
+	}
+}
+
+func TestToContextNilLoggerDoesNotPanic(t *testing.T) {
+	t.Cleanup(func() { SetDefault(nil) })
+
+	buf := &bytes.Buffer{}
+	SetDefault(NewLogger(WithWriter(buf)))
+
+	// A nil *Logger still satisfies the type assertion in FromContext, so it
+	// must be rejected rather than handed back to panic on first use.
+	ctx := ToContext(context.Background(), nil)
+	if _, ok := FromContextOK(ctx); ok {
+		t.Errorf("a nil logger stored in ctx must not be reported as present")
+	}
+	FromContext(ctx).Info("must not panic")
+
+	if buf.Len() == 0 {
+		t.Errorf("fallback logger was not used")
+	}
+}
+
+func TestToContextNilContext(t *testing.T) {
+	l, buf := newTestLogger(t)
+
+	var nilCtx context.Context
+	FromContext(ToContext(nilCtx, l)).Info("ok")
+
+	if buf.Len() == 0 {
+		t.Errorf("ToContext(nil ctx) lost the logger")
+	}
+}
+
+// --- v2.1: WithWriter and options over a supplied handler -------------------
+
+// The whole point of WithWriter: capture output without losing every other
+// option, which is what happens with WithHandler.
+func TestWithWriterAppliesAllOptions(t *testing.T) {
+	buf := &bytes.Buffer{}
+	l := NewLogger(
+		WithWriter(buf),
+		WithLevel(slog.LevelDebug),
+		WithAttrRemapping(map[string]string{"msg": "message", "level": "severity"}),
+		WithTimeFormat("2006"),
+	)
+	l.Debug("hello")
+
+	m := decode(t, buf)
+	if m["message"] != "hello" {
+		t.Errorf("msg was not remapped to message: %v", m)
+	}
+	if m["severity"] != "DEBUG" {
+		t.Errorf("severity = %v, want DEBUG (level remapped and WithLevel honored)", m["severity"])
+	}
+	if ts, ok := m["time"].(string); !ok || len(ts) != 4 {
+		t.Errorf("time = %v, want a 4-character year from WithTimeFormat", m["time"])
+	}
+}
+
+func TestWithHandlerHonorsLevel(t *testing.T) {
+	buf := &bytes.Buffer{}
+	// The supplied handler filters at Error; the explicit WithLevel must win.
+	h := slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})
+	l := NewLogger(WithHandler(h), WithLevel(slog.LevelDebug))
+
+	l.Debug("visible")
+	if buf.Len() == 0 {
+		t.Fatalf("WithLevel was silently ignored alongside WithHandler")
+	}
+	if m := decode(t, buf); m["msg"] != "visible" {
+		t.Errorf("msg = %v, want visible", m["msg"])
+	}
+}
+
+func TestWithHandlerAloneKeepsItsOwnLevel(t *testing.T) {
+	buf := &bytes.Buffer{}
+	h := slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelError})
+	l := NewLogger(WithHandler(h))
+
+	l.Info("filtered")
+	if buf.Len() != 0 {
+		t.Errorf("handler's own level should apply when WithLevel is absent, got %s", buf.String())
+	}
+}
+
+// Built-in keys belong to the supplied handler, but user attributes are ours to
+// remap — including those added through With.
+func TestWithHandlerRemapsUserAttrs(t *testing.T) {
+	buf := &bytes.Buffer{}
+	h := slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	l := NewLogger(WithHandler(h), WithAttrRemapping(map[string]string{"user_id": "userId"}))
+
+	l.With("user_id", 7).Info("hi", "user_id", 42)
+
+	m := decode(t, buf)
+	if _, ok := m["user_id"]; ok {
+		t.Errorf("user_id was not remapped: %v", m)
+	}
+	if m["userId"] == nil {
+		t.Errorf("userId missing after remapping: %v", m)
+	}
+}
+
+// --- v2.1: ErrorMsg ---------------------------------------------------------
+
+func TestErrorMsg(t *testing.T) {
+	l, buf := newTestLogger(t)
+	err := fmt.Errorf("dial tcp 10.0.0.5:6379: %w", errors.New("connection refused"))
+	l.ErrorMsg("send message failed", err, "user_id", 7)
+
+	m := decode(t, buf)
+	if m["msg"] != "send message failed" {
+		t.Errorf("msg = %v, want the stable message, not the error text", m["msg"])
+	}
+	if s, ok := m["error"].(string); !ok || !strings.Contains(s, "connection refused") {
+		t.Errorf("error attr = %v, want the error text", m["error"])
+	}
+	if m["level"] != "ERROR" {
+		t.Errorf("level = %v, want ERROR", m["level"])
+	}
+	if c, ok := m["caller"].(string); !ok || !strings.Contains(c, "logger_test.go") {
+		t.Errorf("caller = %v, want this test's call site", m["caller"])
+	}
+	if m["user_id"] != float64(7) {
+		t.Errorf("user_id = %v, want 7", m["user_id"])
+	}
+}
+
+func TestErrorMsgNilError(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.ErrorMsg("nothing broke", nil)
+
+	m := decode(t, buf)
+	if m["msg"] != "nothing broke" {
+		t.Errorf("msg = %v, want 'nothing broke'", m["msg"])
+	}
+	if _, ok := m["error"]; ok {
+		t.Errorf("error attr should be absent for a nil error, got %v", m["error"])
+	}
+}
+
+func TestErrorMsgWithStack(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.ErrorMsg("op failed", &stackError{msg: "kaboom"})
+
+	m := decode(t, buf)
+	stack, ok := m["stack"].(string)
+	if !ok {
+		t.Fatalf("expected stack attr for a formatter error: %v", m)
+	}
+	if !strings.Contains(stack, "main.go:42") {
+		t.Errorf("stack = %q, want it to contain the trace", stack)
+	}
+}
+
+func TestErrorMsgContext(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.ErrorMsgContext(context.Background(), "op failed", errors.New("boom"))
+
+	if m := decode(t, buf); m["msg"] != "op failed" || m["error"] != "boom" {
+		t.Errorf("got %v, want msg 'op failed' with error 'boom'", m)
+	}
+}
+
+// --- v2.1: WithOverwrite fixes ----------------------------------------------
+
+func TestGroupWithOverwritePreservesGroup(t *testing.T) {
+	l, buf := newTestLogger(t, WithDefaultAttrs("env", "dev"))
+
+	l.Group("req").WithOverwrite("env", "prod").Info("hit", "path", "/x")
+
+	m := decode(t, buf)
+	if m["env"] != "prod" {
+		t.Errorf("env = %v, want prod", m["env"])
+	}
+	grp, ok := m["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("group 'req' was lost by WithOverwrite: %v", m)
+	}
+	if grp["path"] != "/x" {
+		t.Errorf("req.path = %v, want /x", grp["path"])
+	}
+}
+
+// topLevelKeys returns the object's keys in the order they were serialized.
+// json.Unmarshal into a map would lose that order (and silently collapse
+// duplicates).
+func topLevelKeys(t *testing.T, line string) []string {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(line))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		t.Fatalf("expected a JSON object in %q, got %v (%v)", line, tok, err)
+	}
+	var keys []string
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			t.Fatalf("reading key: %v", err)
+		}
+		keys = append(keys, k.(string))
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			t.Fatalf("reading value for %v: %v", k, err)
+		}
+	}
+	return keys
+}
+
+// WithOverwrite used to build its attrs by ranging over a map, so field order
+// changed from record to record. The middleware calls it once per request, so
+// that would have shown up as churn in every log line.
+func TestWithOverwriteKeepsAttrOrderStable(t *testing.T) {
+	var want string
+	for i := 0; i < 50; i++ {
+		buf := &bytes.Buffer{}
+		l := NewLogger(WithWriter(buf), WithDefaultAttrs("a", 1, "b", 2, "c", 3, "d", 4))
+		l.WithOverwrite("b", 20, "e", 5).Info("x")
+
+		got := strings.Join(topLevelKeys(t, strings.TrimSpace(buf.String())), ",")
+		if i == 0 {
+			want = got
+			continue
+		}
+		if got != want {
+			t.Fatalf("attribute order is nondeterministic:\n got %s\nwant %s", got, want)
+		}
+	}
+
+	// An overwritten key keeps its original position; a new key is appended.
+	if want != "time,level,msg,a,b,c,d,e" {
+		t.Errorf("key order = %s, want time,level,msg,a,b,c,d,e", want)
+	}
+}
+
+func TestWithOverwriteAfterWith(t *testing.T) {
+	l, buf := newTestLogger(t, WithDefaultAttrs("env", "dev"))
+
+	l.With("req", "r-1").WithOverwrite("env", "prod").Info("x")
+
+	m := decode(t, buf)
+	if m["env"] != "prod" {
+		t.Errorf("env = %v, want prod", m["env"])
+	}
+	if m["req"] != "r-1" {
+		t.Errorf("req = %v, want r-1 (attr added by With must survive)", m["req"])
+	}
+}
+
+// --- v2.1: Log / Enabled ----------------------------------------------------
+
+func TestLogAtDynamicLevel(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.Log(context.Background(), slog.LevelWarn, "dynamic", "k", "v")
+
+	m := decode(t, buf)
+	if m["level"] != "WARN" {
+		t.Errorf("level = %v, want WARN", m["level"])
+	}
+	if m["msg"] != "dynamic" || m["k"] != "v" {
+		t.Errorf("got %v, want msg 'dynamic' with k=v", m)
+	}
+}
+
+func TestEnabled(t *testing.T) {
+	l, _ := newTestLogger(t) // handler admits Debug
+	if !l.Enabled(context.Background(), slog.LevelDebug) {
+		t.Errorf("Enabled(Debug) = false on a Debug-level logger")
+	}
+
+	quiet := NewLogger(WithWriter(io.Discard), WithLevel(slog.LevelError))
+	if quiet.Enabled(context.Background(), slog.LevelInfo) {
+		t.Errorf("Enabled(Info) = true on an Error-level logger")
+	}
+	if !quiet.Enabled(context.Background(), slog.LevelError) {
+		t.Errorf("Enabled(Error) = false on an Error-level logger")
+	}
+}

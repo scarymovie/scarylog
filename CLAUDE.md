@@ -12,16 +12,28 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 ## Layout
 
 - `logger.go` — `Logger`, functional `Option`s (`WithLevel`, `WithHandler`,
-  `WithDefaultAttrs`, `WithGroup`, `WithAttrRemapping`, `WithTimeFormat`), the leveled
-  methods (`Info`/`Warn`/`Debug`/`Error`) and their context-aware variants
-  (`InfoContext`/`WarnContext`/`DebugContext`/`ErrorContext`, which forward `ctx` to the
-  handler), plus `With`, `WithOverwrite`, `Group`.
+  `WithWriter`, `WithDefaultAttrs`, `WithGroup`, `WithAttrRemapping`, `WithTimeFormat`),
+  the leveled methods (`Info`/`Warn`/`Debug`/`Error`/`ErrorMsg`) and their context-aware
+  variants (`InfoContext`/`WarnContext`/`DebugContext`/`ErrorContext`/`ErrorMsgContext`,
+  which forward `ctx` to the handler), the level-generic `Log`/`Enabled`, plus `With`,
+  `WithOverwrite`, `Group`.
+- `handler.go` — `optionsHandler`, which applies the options that can still be
+  honored on top of a handler supplied via `WithHandler` (`WithLevel` always;
+  attribute remapping and time format for user attributes only — the record's own
+  `time`/`level`/`msg` keys belong to that handler's `ReplaceAttr`).
 - `doc.go` — package-level godoc overview.
-- `context.go` — `ToContext` / `FromContext` (returns a shared lazy default logger
-  when none is in the context, never nil, never panics).
-- `scaryhttp/` — stdlib-only `net/http` middleware (`Middleware`) that attaches a
-  per-request id + request-scoped logger and logs the request lifecycle. Same module,
-  no third-party deps.
+- `context.go` — `ToContext` / `FromContext` / `FromContextOK`, and
+  `SetDefault` / `Default` for the application-wide fallback. `FromContext` never
+  returns nil and never panics, including for a nil ctx or a nil logger in ctx.
+- `scaryhttp/` — stdlib-only `net/http` middleware (`Middleware`) that attaches
+  per-request correlation ids + a request-scoped logger and logs the request
+  lifecycle (including on panic). Same module, no third-party deps.
+- `scaryhttp/responsewriter.go` — the response-writer wrapper. One concrete type
+  per combination of `http.Flusher`/`http.Hijacker`/`io.ReaderFrom`/`http.Pusher`,
+  chosen by bitmask, so the writer handed to the handler implements **exactly**
+  the interfaces the original does. This is what keeps WebSocket upgrades and
+  streaming alive behind the middleware; do not collapse it into unconditional
+  methods, which would make every writer claim capabilities it may not have.
 - `logger_test.go` — table/behavioral tests; output is asserted by parsing the JSON
   records the handler emits.
 - `SKILL.md` — AI-assistant usage guide for this library (shipped with the repo).
@@ -56,3 +68,12 @@ released as v2.0.1). v2 intentionally broke the `Error` signature (see above)
 versus v1.0.x. Per Go semantic-import-versioning, the `/v2` path suffix is required
 so v1 consumers keep working on the old path. Any further breaking change requires a new major suffix
 (`/v3`) and module-path bump.
+
+**v2.1.0** answers an integration report from the `websocket-server` team (echo +
+gorilla/websocket): `scaryhttp` could not be enabled at all, because wrapping the
+response writer killed the WebSocket upgrade. Everything in the release is
+additive — new options and methods, plus bug fixes — so no `/v3` is needed.
+Two behaviour changes worth knowing when reading old code: `scaryhttp` now derives
+its per-request logger with `WithOverwrite` rather than `With` (a base logger
+already carrying `request_id` used to emit the key twice), and `WithOverwrite`
+preserves attribute order instead of ranging over a map.
