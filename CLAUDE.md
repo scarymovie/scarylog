@@ -49,6 +49,12 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
   with `%w` returns a `*fmt.wrapError` that is not a `fmt.Formatter`, so checking
   only the top error would disable stacks for the wrapping idiom this repo
   documents.
+- **`stackOf`'s walk must stay iterative.** It carries branches from
+  `Unwrap() []error` on an explicit `pending` slice under a single
+  `maxUnwrapNodes` budget for the whole tree. Recursing per branch restarts the
+  budget on every level, so a cyclic multi-error walks forever and the process
+  dies with `fatal error: stack overflow` — unrecoverable, and raised from inside
+  the error-logging path. `TestErrorCyclicMultiError` guards this.
 - **`Error(err error, args ...any)`** — the error is the first arg and becomes the
   log message. Add context by wrapping (`fmt.Errorf("...: %w", err)`), not a separate
   message string. Passing `nil` is safe.

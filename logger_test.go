@@ -861,6 +861,92 @@ func TestErrorMsgStackSurvivesWrapping(t *testing.T) {
 	}
 }
 
+// --- v2.1.3: cyclic multi-errors don't blow the goroutine stack -------------
+
+// cyclicMulti is the Unwrap() []error counterpart to selfWrap: a multi-error
+// that can be wired into a cycle. Error() is deliberately non-recursive, so a
+// test that hangs or dies is the chain walk's fault and nothing else.
+type cyclicMulti struct{ errs []error }
+
+func (m *cyclicMulti) Error() string   { return "multi" }
+func (m *cyclicMulti) Unwrap() []error { return m.errs }
+
+// selfCyclicMulti returns a multi-error that wraps itself.
+func selfCyclicMulti() *cyclicMulti {
+	m := &cyclicMulti{}
+	m.errs = []error{m}
+	return m
+}
+
+// mutualCyclicMulti returns two multi-errors that wrap each other.
+func mutualCyclicMulti() *cyclicMulti {
+	a, b := &cyclicMulti{}, &cyclicMulti{}
+	a.errs = []error{b}
+	b.errs = []error{a}
+	return a
+}
+
+// A cycle reached through Unwrap() []error used to recurse with the depth
+// counter reset on every branch, so the walk never terminated: the process died
+// with an unrecoverable "fatal error: stack overflow" inside the error logging
+// path itself. These cases must simply return.
+func TestErrorCyclicMultiError(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{"self-referential multi", selfCyclicMulti(), "multi"},
+		{"mutually referential multi", mutualCyclicMulti(), "multi"},
+		{"cycle behind a wrap", fmt.Errorf("op: %w", selfCyclicMulti()), "op: multi"},
+		{"cycle joined with a plain error", errors.Join(errors.New("other"), selfCyclicMulti()), "other\nmulti"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			l, buf := newTestLogger(t)
+			l.Error(tc.err)
+
+			m := decode(t, buf)
+			if _, ok := m["stack"]; ok {
+				t.Errorf("cyclic error should not produce a stack attr: %v", m)
+			}
+			if m["msg"] != tc.wantMsg {
+				t.Errorf("msg = %v, want %q", m["msg"], tc.wantMsg)
+			}
+		})
+	}
+}
+
+// The budget must not be spent before a branch that actually carries a trace:
+// a cycle in one branch may not hide the stack sitting in an earlier one.
+func TestErrorStackFoundBesideCyclicBranch(t *testing.T) {
+	l, buf := newTestLogger(t)
+	l.Error(errors.Join(&stackError{msg: "kaboom"}, selfCyclicMulti()))
+
+	m := decode(t, buf)
+	stack, ok := m["stack"].(string)
+	if !ok || !strings.Contains(stack, "main.go:42") {
+		t.Errorf("stack = %v, want the joined error's trace", m["stack"])
+	}
+}
+
+// A deeply nested but acyclic tree of joins recursed once per level before the
+// walk was made iterative. It now runs on a constant goroutine stack.
+func TestErrorDeeplyNestedMultiError(t *testing.T) {
+	var err error = errors.New("boom")
+	for range 50_000 {
+		err = errors.Join(err)
+	}
+
+	l, buf := newTestLogger(t)
+	l.Error(err)
+
+	if m := decode(t, buf); m["msg"] != "boom" {
+		t.Errorf("msg = %v, want %q", m["msg"], "boom")
+	}
+}
+
 // --- v2.1.2: AddSource points at the call site ------------------------------
 
 // here returns the line number of its own call site.

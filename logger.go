@@ -269,9 +269,10 @@ func shortPath(file string) string {
 	return file
 }
 
-// maxUnwrapDepth bounds the error chain walk in stackOf, so a self-referential
-// error can't spin forever.
-const maxUnwrapDepth = 100
+// maxUnwrapNodes bounds the total number of errors stackOf examines across the
+// whole Unwrap tree. It is a budget for the entire walk, not a per-chain depth:
+// a cyclic error — single-wrap or multi — burns through it and the walk gives up.
+const maxUnwrapNodes = 1000
 
 // stackOf returns a stack trace rendered by err or by any error it wraps.
 //
@@ -285,8 +286,18 @@ const maxUnwrapDepth = 100
 // The outermost trace wins: when several errors in the chain carry one, that is
 // the most complete. The returned text belongs to that error, not to the full
 // wrapped message — the record's message already carries err.Error() in full.
+//
+// The walk is deliberately iterative. Recursing per branch would grow the
+// goroutine stack with the error tree, and a cyclic multi-error would grow it
+// without bound — a fatal stack overflow, which recover cannot catch. A single
+// budget covers the whole tree, so no input can make the walk unbounded.
 func stackOf(err error) (string, bool) {
-	for depth := 0; err != nil && depth < maxUnwrapDepth; depth++ {
+	// pending holds branches deferred by multi-errors, popped LIFO so the walk
+	// stays depth-first and left-to-right and the same trace wins as before. It
+	// stays nil for the common single-wrap chain, which allocates nothing.
+	var pending []error
+
+	for budget := maxUnwrapNodes; err != nil && budget > 0; budget-- {
 		if _, ok := err.(fmt.Formatter); ok {
 			if s := fmt.Sprintf("%+v", err); s != err.Error() {
 				return s, true
@@ -298,14 +309,21 @@ func stackOf(err error) (string, bool) {
 			err = e.Unwrap()
 		case interface{ Unwrap() []error }:
 			// errors.Join and multi-error wrappers: first branch with a trace.
-			for _, sub := range e.Unwrap() {
-				if s, ok := stackOf(sub); ok {
-					return s, true
+			// Pushed in reverse so they pop in their original order.
+			subs := e.Unwrap()
+			err = nil
+			for i := len(subs) - 1; i >= 0; i-- {
+				if subs[i] != nil {
+					pending = append(pending, subs[i])
 				}
 			}
-			return "", false
 		default:
-			return "", false
+			err = nil
+		}
+
+		if err == nil && len(pending) > 0 {
+			err = pending[len(pending)-1]
+			pending = pending[:len(pending)-1]
 		}
 	}
 	return "", false
