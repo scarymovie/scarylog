@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Руководство по использованию / Usage guide (SKILL.md)"
+    url: "https://github.com/scarymovie/scarylog/blob/main/SKILL.md"
+    about: "Полное описание API, примеры и best practices. / Full API reference, examples and best practices."
+  - name: "Сообщить об уязвимости / Report a vulnerability"
+    url: "https://github.com/scarymovie/scarylog/security/advisories/new"
+    about: "Приватный отчёт через GitHub Security Advisories — не открывайте публичный issue. / Private report via GitHub Security Advisories — do not open a public issue."
+  - name: "Как участвовать / Contributing guide"
+    url: "https://github.com/scarymovie/scarylog/blob/main/.github/CONTRIBUTING.md"
+    about: "Инварианты репозитория, команды и процесс PR. / Repository invariants, commands and the PR process."

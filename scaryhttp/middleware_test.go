@@ -70,6 +70,34 @@ func firstLine(t *testing.T, out string) string {
 	return line
 }
 
+// waitLogDeadline bounds how long the real-server tests wait for a record that
+// is written on the server's handler goroutine.
+const waitLogDeadline = 2 * time.Second
+
+// decodeFirstWait is decodeFirst for tests driving a real httptest.Server: it
+// polls buf until a whole record is in it, or waitLogDeadline expires.
+//
+// srv.Close() is not a synchronization point for these records. The middleware
+// emits "request finished" from a defer, and httptest.Server drops a connection
+// from the WaitGroup that Close waits on as soon as it reaches
+// http.StateHijacked - which net/http sets inside Hijack(), before the handler
+// has even returned.
+func decodeFirstWait(t *testing.T, buf *syncBuffer) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(waitLogDeadline)
+	for {
+		// A record is written with a single newline-terminated Write, so a
+		// newline means there is a whole one to parse.
+		if out := buf.String(); strings.Contains(out, "\n") {
+			return decodeFirst(t, out)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no log output after %v", waitLogDeadline)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestMiddlewareGeneratesAndEchoesRequestID(t *testing.T) {
 	buf := &bytes.Buffer{}
 	base := newCapturingLogger(buf)
@@ -111,7 +139,7 @@ func TestMiddlewareGeneratesAndEchoesRequestID(t *testing.T) {
 
 func TestMiddlewarePropagatesInboundID(t *testing.T) {
 	buf := &bytes.Buffer{}
-	h := Middleware(newCapturingLogger(buf))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	h := Middleware(newCapturingLogger(buf))(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(DefaultRequestIDHeader, "inbound-42")
@@ -131,7 +159,7 @@ func TestMiddlewareSkip(t *testing.T) {
 	mw := Middleware(newCapturingLogger(buf),
 		WithSkip(func(r *http.Request) bool { return r.URL.Path == "/health" }),
 	)
-	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := mw(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		// Even when skipped, the logger must still be in ctx.
 		if scarylog.FromContext(r.Context()) == nil {
 			t.Errorf("logger missing from ctx on skipped path")
@@ -152,7 +180,7 @@ func TestMiddlewareSkip(t *testing.T) {
 func TestMiddlewareLogStart(t *testing.T) {
 	buf := &bytes.Buffer{}
 	h := Middleware(newCapturingLogger(buf), WithLogStart(true))(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x", nil))
@@ -170,8 +198,8 @@ func TestMiddlewareLogStart(t *testing.T) {
 	}
 }
 
-func TestMiddlewareNilBaseDoesNotPanic(t *testing.T) {
-	h := Middleware(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+func TestMiddlewareNilBaseDoesNotPanic(_ *testing.T) {
+	h := Middleware(nil)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil)) // must not panic
 }
@@ -185,7 +213,7 @@ func TestMiddlewareNilBaseDoesNotPanic(t *testing.T) {
 func TestMiddlewarePreservesHijackOnRealServer(t *testing.T) {
 	base, buf := newServerLogger()
 
-	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			t.Errorf("handler did not receive an http.Hijacker: WebSocket upgrades would fail")
@@ -239,7 +267,9 @@ func TestMiddlewarePreservesHijackOnRealServer(t *testing.T) {
 
 	srv.Close()
 
-	m := decodeFirst(t, buf.String())
+	// Close returned without waiting for the handler: httptest released the
+	// connection the moment it was hijacked. Poll for the finish record.
+	m := decodeFirstWait(t, buf)
 	if m["msg"] != "request finished" {
 		t.Errorf("msg = %v, want 'request finished'", m["msg"])
 	}
@@ -263,7 +293,7 @@ func TestMiddlewarePreservesFlushOnRealServer(t *testing.T) {
 	const chunk = "data: tick\n\n"
 	released := make(chan struct{})
 
-	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		f, ok := w.(http.Flusher)
 		if !ok {
 			t.Errorf("handler did not receive an http.Flusher: streaming would stall")
@@ -314,7 +344,7 @@ func TestMiddlewarePreservesFlushOnRealServer(t *testing.T) {
 func TestMiddlewareResponseControllerReachesRealWriter(t *testing.T) {
 	base, _ := newServerLogger()
 
-	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Now().Add(time.Minute)); err != nil {
 			t.Errorf("ResponseController.SetWriteDeadline: %v", err)
@@ -341,7 +371,7 @@ func TestMiddlewareSkipWrapPassesOriginalWriter(t *testing.T) {
 	var seen http.ResponseWriter
 	h := Middleware(newCapturingLogger(buf),
 		WithSkipWrap(func(r *http.Request) bool { return r.URL.Path == "/ws" }),
-	)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		seen = w
 	}))
 
@@ -365,7 +395,7 @@ func TestMiddlewareSkipWrapPassesOriginalWriter(t *testing.T) {
 // middleware.
 func TestMiddlewareLogsWhenHandlerPanics(t *testing.T) {
 	buf := &bytes.Buffer{}
-	h := Middleware(newCapturingLogger(buf))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := Middleware(newCapturingLogger(buf))(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic("boom")
 	}))
 
@@ -402,7 +432,7 @@ func TestMiddlewareDoesNotDuplicateRequestID(t *testing.T) {
 		scarylog.WithDefaultAttrs(slog.String("request_id", "APP-UUID"), slog.String("svc", "api")),
 	)
 
-	h := Middleware(base)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	h := Middleware(base)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set(DefaultRequestIDHeader, "REQ-1")
@@ -431,7 +461,7 @@ func TestMiddlewareWithLevels(t *testing.T) {
 	h := Middleware(base,
 		WithLogStart(true),
 		WithLevels(slog.LevelDebug, slog.LevelWarn),
-	)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
 
@@ -461,7 +491,7 @@ func TestMiddlewareMultipleCorrelationIDs(t *testing.T) {
 
 	h := Middleware(base,
 		WithCorrelationID("X-Trace-ID", "trace_id"),
-	)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -491,7 +521,7 @@ func TestMiddlewareCorrelationIDsReplaceDefaults(t *testing.T) {
 
 	h := Middleware(base,
 		WithCorrelationIDs(CorrelationID{Header: "X-Corr", AttrKey: "corr"}),
-	)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	)(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))

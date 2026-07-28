@@ -1,0 +1,97 @@
+name: "Баг-репорт / Bug report"
+description: "Некорректное поведение scarylog или scaryhttp / Incorrect behaviour in scarylog or scaryhttp"
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за отчёт. Заполняйте по-русски или по-английски — как удобнее.
+        Thanks for the report. Fill this in in Russian or English, whichever suits you.
+
+        Уязвимости сюда **не** отправляйте: используйте приватный отчёт, см. [SECURITY.md](https://github.com/scarymovie/scarylog/blob/main/.github/SECURITY.md).
+        Do **not** report vulnerabilities here: use private reporting, see [SECURITY.en.md](https://github.com/scarymovie/scarylog/blob/main/.github/SECURITY.en.md).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: "Перед отправкой / Before you file"
+      options:
+        - label: "Я на пути модуля `github.com/scarymovie/scarylog/v2`; линия v1 не поддерживается. / I am on the `github.com/scarymovie/scarylog/v2` module path; the v1 line is unsupported."
+          required: true
+        - label: "Я сверился(-ась) с задокументированным поведением в [SKILL.md](https://github.com/scarymovie/scarylog/blob/main/SKILL.md). / I checked the documented behaviour in SKILL.md."
+          required: true
+        - label: "Это не уязвимость безопасности. / This is not a security vulnerability."
+          required: true
+
+  - type: input
+    id: scarylog-version
+    attributes:
+      label: "Версия scarylog / scarylog version"
+      description: "Тег или коммит. / Tag or commit."
+      placeholder: "v2.1.3"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: "Вывод `go version` / Output of `go version`"
+      placeholder: "go version go1.26.0 linux/amd64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Область / Area"
+      options:
+        - "logger — уровневые методы / leveled methods, With, WithOverwrite, Group"
+        - "ошибки / errors — Error, ErrorMsg, стек-трейсы / stack traces, stackOf"
+        - "context — ToContext, FromContext, FromContextOK, SetDefault, Default"
+        - "опции и хендлер / options and handler — WithHandler, WithWriter, WithLevel, WithAttrRemapping, WithTimeFormat, WithSource"
+        - "scaryhttp — middleware, correlation id, response writer, WebSocket / streaming"
+        - "документация / documentation — README, SKILL.md, godoc"
+        - "другое / other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: "Минимальный воспроизводимый пример / Minimal reproducer"
+      description: "Компилируемый фрагмент или тест — оберните в ```go блок. / A compilable snippet or test — wrap it in a ```go block."
+      placeholder: |
+        ```go
+        log := scarylog.NewLogger(scarylog.WithWriter(&buf))
+        log.Error(fmt.Errorf("charge customer %s: %w", id, errBoom))
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Ожидаемое поведение / Expected behaviour"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: "Фактическое поведение / Actual behaviour"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: "Записи лога / Log records"
+      description: "Целиком, как их эмитит хендлер. / In full, exactly as the handler emits them."
+      render: JSON
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "Что ещё стоит знать / Anything else"
+      description: "Обходные пути, окружение, связанные issue. / Workarounds, environment, related issues."

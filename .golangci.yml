@@ -1,0 +1,36 @@
+# golangci-lint v2 config. v1 cannot lint this module at all: it only supports
+# Go versions up to the one it was built with, and go.mod declares `go 1.26`.
+# The pinned version lives in .github/workflows/ci.yml (GOLANGCI_LINT_VERSION).
+version: "2"
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - copyloopvar
+    - misspell
+    - revive
+  settings:
+    misspell:
+      locale: US
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+      - common-false-positives
+      - legacy
+    rules:
+      # Tests assert on values, not on the error of every Close/Write.
+      - path: _test\.go
+        linters: [errcheck]
+
+issues:
+  # Report everything. The defaults (50 per linter, 3 per message) silently
+  # truncate: the first run of this config showed 12 issues where there were 19.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

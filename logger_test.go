@@ -377,7 +377,7 @@ func TestFromContextDefaultSingleton(t *testing.T) {
 type ctxAttrKey string
 
 // ctxAttrHandler is a context-aware handler: it pulls a request-scoped value out
-// of ctx and adds it to the record, modelling trace correlation. It only sees
+// of ctx and adds it to the record, modeling trace correlation. It only sees
 // that value when a real ctx is forwarded (i.e. via the *Context methods).
 type ctxAttrHandler struct {
 	slog.Handler
@@ -501,7 +501,7 @@ func TestSetDefaultAndDefault(t *testing.T) {
 	if Default() == app {
 		t.Errorf("SetDefault(nil) did not restore the built-in default")
 	}
-	if Default() != Default() {
+	if Default() != Default() { //nolint:staticcheck // deliberate identity assertion: the built-in default must be one shared singleton, so both sides are meant to be the same expression.
 		t.Errorf("built-in default should stay a shared singleton")
 	}
 }
@@ -934,7 +934,7 @@ func TestErrorStackFoundBesideCyclicBranch(t *testing.T) {
 // A deeply nested but acyclic tree of joins recursed once per level before the
 // walk was made iterative. It now runs on a constant goroutine stack.
 func TestErrorDeeplyNestedMultiError(t *testing.T) {
-	var err error = errors.New("boom")
+	err := errors.New("boom")
 	for range 50_000 {
 		err = errors.Join(err)
 	}

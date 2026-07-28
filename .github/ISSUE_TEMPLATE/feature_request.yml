@@ -1,0 +1,68 @@
+name: "Предложение / Feature request"
+description: "Новая опция, метод или поведение / A new option, method or behaviour"
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `scarylog` — намеренно тонкая обёртка над `log/slog` **без сторонних зависимостей**. Предложения, которые требуют внешней библиотеки, приняты не будут.
+        `scarylog` is a deliberately thin wrapper around `log/slog` with **no third-party dependencies**. Proposals that need an external library will not be accepted.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: "Ограничения проекта / Project constraints"
+      options:
+        - label: "Реализуемо только на стандартной библиотеке: блок `require` в `go.mod` останется пустым. / Implementable with the standard library only: `go.mod`'s require block stays empty."
+          required: true
+        - label: "Я понимаю, что ломающее изменение API потребует пути `/v3` и смены пути модуля. / I understand a breaking API change would require a `/v3` module path."
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Задача / Problem"
+      description: "Что сегодня неудобно или невозможно? Приведите реальный случай, а не гипотетический. / What is awkward or impossible today? Give a real case, not a hypothetical."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Область / Area"
+      options:
+        - "logger — уровневые методы / leveled methods, With, WithOverwrite, Group"
+        - "ошибки / errors — Error, ErrorMsg, стек-трейсы / stack traces"
+        - "context — ToContext, FromContext, SetDefault, Default"
+        - "опции и хендлер / options and handler"
+        - "scaryhttp — middleware, correlation id, response writer"
+        - "документация / documentation"
+        - "другое / other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Предлагаемое API / Proposed API"
+      description: "Как это выглядит на стороне вызывающего кода? / What does it look like at the call site?"
+      render: Go
+
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: "Совместимость / Compatibility"
+      options:
+        - "Аддитивно: новая опция или метод, ничего не ломается / Additive: new option or method, nothing breaks"
+        - "Меняет поведение по умолчанию / Changes existing default behaviour"
+        - "Ломающее изменение API: требует /v3 / Breaking API change: requires /v3"
+        - "Не уверен(а) / Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Что уже пробовали / Alternatives considered"
+      description: "Почему `With`, `WithOverwrite`, `Group`, `WithHandler` или обёртка на стороне приложения не решают задачу? / Why don't `With`, `WithOverwrite`, `Group`, `WithHandler` or an application-side wrapper solve it?"

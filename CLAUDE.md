@@ -38,6 +38,14 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 - `logger_test.go` — table/behavioral tests; output is asserted by parsing the JSON
   records the handler emits.
 - `SKILL.md` — AI-assistant usage guide for this library (shipped with the repo).
+- `.golangci.yml` — golangci-lint **v2** config (standard set + `copyloopvar`,
+  `misspell`, `revive`). v1 cannot lint this module: it supports only Go versions
+  up to the one it was built with, and `go.mod` says `go 1.26`. The exact linter
+  version CI installs is pinned in `.github/workflows/ci.yml`.
+- `.github/` — CI (test with `-race -shuffle=on`, lint, govulncheck; every action
+  pinned to a commit SHA), Dependabot for those actions, plus CODEOWNERS,
+  SECURITY, CONTRIBUTING and the issue/PR templates. Contributor-facing docs are
+  bilingual, following the `README.md` / `README.en.md` pattern.
 - `workerpool/` — a **separate, unrelated** skill about implementing worker pools.
   Do not modify or commit it as part of scarylog changes.
 
@@ -76,7 +84,9 @@ caller/stack capture on errors, attribute grouping, attribute overwrite, and
 go build ./...
 go vet ./...
 go test ./... -race -cover     # concurrent paths must pass under -race
+go test ./... -race -shuffle=on # test order must not be load-bearing (CI runs this)
 go mod tidy                     # require block must stay empty
+golangci-lint run               # v2 only; see .golangci.yml
 ```
 
 ## Versioning

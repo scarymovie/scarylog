@@ -145,7 +145,7 @@ func buildHandler(o *Options) slog.Handler {
 
 	handlerOpts := &slog.HandlerOptions{Level: level, AddSource: o.AddSource}
 	if len(o.AttrMap) > 0 || o.TimeFormat != "" {
-		handlerOpts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+		handlerOpts.ReplaceAttr = func(_ []string, a slog.Attr) slog.Attr {
 			if newKey, ok := o.AttrMap[a.Key]; ok {
 				a.Key = newKey
 			}

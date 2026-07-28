@@ -179,7 +179,7 @@ func Middleware(base *scarylog.Logger, opts ...Option) func(http.Handler) http.H
 			}
 
 			var (
-				rec http.ResponseWriter = w
+				rec = w
 				sr  *recorder
 			)
 			if cfg.skipWrap == nil || !cfg.skipWrap(r) {

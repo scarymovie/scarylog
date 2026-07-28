@@ -1,0 +1,5 @@
+# Every path in scarylog is owned by the maintainer.
+# Reviewers: the invariants a change must not break are listed in
+# .github/CONTRIBUTING.md and CLAUDE.md.
+
+*   @scarymovie
