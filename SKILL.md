@@ -179,10 +179,12 @@ import (
     "github.com/scarymovie/scarylog/v2/scaryhttp"
 )
 
-base := scarylog.NewLogger()
-mux := http.NewServeMux()
-// ... register handlers ...
-srv := scaryhttp.Middleware(base)(mux)
+func newServer() http.Handler {
+    base := scarylog.NewLogger()
+    mux := http.NewServeMux()
+    // ... register handlers ...
+    return scaryhttp.Middleware(base)(mux)
+}
 
 // Inside any handler, pull the request-scoped logger (carries request_id):
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +247,7 @@ per task**. The principle:
 
 ```go
 // App start: shared traceId + an initial requestId.
-base := scarylog.NewLogger(
+var base = scarylog.NewLogger(
     scarylog.WithDefaultAttrs("traceId", traceID, "requestId", "req-initial"),
 )
 
